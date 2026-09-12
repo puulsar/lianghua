@@ -126,12 +126,13 @@ public class AuthService {
         loginFailCounter.invalidate(username);
         loginLockUntil.invalidate(username);
 
-        String token = JwtUtils.generateToken(user.getId(), user.getUsername());
+        String token = JwtUtils.generateToken(user.getId(), user.getUsername(), user.getRole());
 
         LoginRespVO resp = new LoginRespVO();
         resp.setToken(token);
         resp.setNickname(user.getNickname() != null ? user.getNickname() : user.getUsername());
         resp.setUsername(user.getUsername());
+        resp.setRole(user.getRole());
         return resp;
     }
 
@@ -200,6 +201,7 @@ public class AuthService {
         vo.setUsername(user.getUsername());
         vo.setNickname(user.getNickname());
         vo.setEmail(user.getEmail());
+        vo.setRole(user.getRole());
         return vo;
     }
 

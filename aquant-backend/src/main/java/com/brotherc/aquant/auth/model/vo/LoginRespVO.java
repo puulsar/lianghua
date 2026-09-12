@@ -8,5 +8,6 @@ public class LoginRespVO {
     private String token;
     private String nickname;
     private String username;
+    private String role;
 
 }

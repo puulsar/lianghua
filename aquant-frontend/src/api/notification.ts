@@ -33,6 +33,13 @@ export function getNotificationList(stockCode: string, assetType: 'STOCK' | 'FUN
 }
 
 /**
+ * 获取当前用户全部提醒设置（管理页用）
+ */
+export function getNotificationListAll() {
+    return request.get<ResponseDTO<StockNotificationVO[]>>('/stock/notification/listAll');
+}
+
+/**
  * 保存提醒设置
  */
 export function saveNotification(data: StockNotificationReq) {

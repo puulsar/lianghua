@@ -19,7 +19,11 @@ public final class UserContext {
     }
 
     public static void set(Long userId, String username) {
-        CONTEXT.set(new UserInfo(userId, username));
+        CONTEXT.set(new UserInfo(userId, username, null));
+    }
+
+    public static void set(Long userId, String username, String role) {
+        CONTEXT.set(new UserInfo(userId, username, role));
     }
 
     /**
@@ -67,7 +71,36 @@ public final class UserContext {
         return username;
     }
 
-    private record UserInfo(Long userId, String username) {
+    /**
+     * 获取当前用户角色，未登录返回 null。
+     */
+    public static String getCurrentRole() {
+        UserInfo info = CONTEXT.get();
+        return info == null ? null : info.role;
+    }
+
+    /**
+     * 当前用户是否为超级管理员。
+     */
+    public static boolean isAdmin() {
+        return "admin".equalsIgnoreCase(getCurrentRole());
+    }
+
+    /**
+     * 要求超级管理员，否则抛出业务异常。
+     */
+    public static Long requireAdmin() {
+        Long userId = getCurrentUserId();
+        if (userId == null) {
+            throw ExceptionEnum.AUTH_TOKEN_INVALID.toException();
+        }
+        if (!isAdmin()) {
+            throw ExceptionEnum.AUTH_ACCESS_DENIED.toException();
+        }
+        return userId;
+    }
+
+    private record UserInfo(Long userId, String username, String role) {
     }
 
 }

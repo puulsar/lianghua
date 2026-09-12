@@ -81,6 +81,15 @@ public class StockNotificationService {
     private final ObjectMapper objectMapper;
 
     /**
+     * 获取用户的全部通知配置（按创建时间倒序）
+     */
+    public List<StockNotificationVO> listByUser(Long userId) {
+        return notificationRepository.findAllByUserIdOrderByCreatedAtDesc(userId).stream()
+                .map(this::convertToVO)
+                .toList();
+    }
+
+    /**
      * 获取用户指定标的的通知配置
      */
     public List<StockNotificationVO> getByUserIdAndStockCode(Long userId, String stockCode, String assetType) {

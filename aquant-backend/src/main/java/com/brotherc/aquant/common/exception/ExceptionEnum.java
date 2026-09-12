@@ -46,6 +46,7 @@ public enum ExceptionEnum {
     AUTH_RESET_CODE_GLOBAL_RATE_LIMIT(1000215, "系统繁忙，请稍后再试"),
     AUTH_ACCOUNT_LOCKED(1000216, "账号已被临时锁定，请 %d 分钟后再试"),
     AUTH_LOGIN_IP_RATE_LIMIT(1000217, "登录请求过于频繁，请稍后再试"),
+    AUTH_ACCESS_DENIED(1000218, "无权限操作，需要超级管理员"),
 
     ARTICLE_NOT_FOUND(1000301, "文章不存在"),
     ARTICLE_ACCESS_DENIED(1000302, "无权访问该文章"),

@@ -25,6 +25,7 @@ export interface FundInfoPageReqVO {
   fundCode?: string
   fundName?: string
   fundType?: string
+  fundTypePrefix?: string
   includeUsStock?: boolean
   sort?: string
 }

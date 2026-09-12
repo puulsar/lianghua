@@ -16,6 +16,8 @@ public interface StockNotificationRepository extends JpaRepository<StockNotifica
 
     List<StockNotification> findAllByIsEnabledAndAssetType(Integer isEnabled, String assetType);
 
+    List<StockNotification> findAllByUserIdOrderByCreatedAtDesc(Long userId);
+
     Optional<StockNotification> findByIdAndUserId(Long id, Long userId);
 
     @Query("SELECT DISTINCT n.stockCode FROM StockNotification n WHERE n.userId = :userId AND n.assetType = :assetType AND n.stockCode IN :stockCodes")

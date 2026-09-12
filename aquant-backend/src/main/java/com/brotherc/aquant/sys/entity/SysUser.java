@@ -48,6 +48,12 @@ public class SysUser {
     private Integer status = 1;
 
     /**
+     * 角色：admin=超级管理员, user=普通用户
+     */
+    @Column(name = "role")
+    private String role = "user";
+
+    /**
      * 创建时间
      */
     @Column(name = "created_at")

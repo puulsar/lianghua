@@ -10,6 +10,7 @@ import com.brotherc.aquant.sync.entity.StockSync;
 import com.brotherc.aquant.strategy.model.vo.DualMABacktestReqVO;
 import com.brotherc.aquant.strategy.model.vo.MomentumBacktestReqVO;
 import com.brotherc.aquant.strategy.model.vo.MacdBacktestReqVO;
+import com.brotherc.aquant.strategy.model.config.StrategyConfig;
 import com.brotherc.aquant.strategy.model.vo.GridBacktestReqVO;
 import com.brotherc.aquant.strategy.model.vo.StockTradeBacktestVO;
 import com.brotherc.aquant.stock.repository.StockQuoteHistoryRepository;
@@ -58,16 +59,9 @@ public class StockStrategySnapshotService {
     private static final String RELIABILITY = "reliability";
 
     private static final String[] PRESET_MARKETS = {"sh", "sz", "bj"};
-    private static final int[] PRESET_MA_OPTIONS = {5, 10, 20, 30, 60, 120};
-    private static final int[] PRESET_MOMENTUM_LOOKBACK_DAY_OPTIONS = {10, 20, 60, 120};
-    private static final int[] PRESET_RECENT_YEARS = {1, 2, 3, 5};
-    private static final int PRESET_MACD_FAST_PERIOD = 12;
-    private static final int PRESET_MACD_SLOW_PERIOD = 26;
-    private static final int PRESET_MACD_SIGNAL_PERIOD = 9;
-    private static final BigDecimal PRESET_GRID_RATE = new BigDecimal("0.03");
-    private static final int PRESET_GRID_COUNT = 5;
     private static final int SNAPSHOT_BATCH_SIZE = 200;
     private static final int MAX_NEED_DAYS = 5 * 250 + 120;
+    private static final BigDecimal HUNDRED = new BigDecimal("100");
 
     private final DualMovingAverageStrategy dualMovingAverageStrategy;
     private final MomentumStrategy momentumStrategy;
@@ -81,6 +75,7 @@ public class StockStrategySnapshotService {
     private final StockStrategyMacdBacktestSnapshotRepository macdSnapshotRepository;
     private final StockStrategyGridBacktestSnapshotRepository gridSnapshotRepository;
     private final StockHelper stockHelper;
+    private final StrategyConfigService strategyConfigService;
 
     private final AtomicBoolean dualMaRefreshing = new AtomicBoolean(false);
     private final AtomicBoolean momentumRefreshing = new AtomicBoolean(false);
@@ -195,32 +190,36 @@ public class StockStrategySnapshotService {
     }
 
     public boolean isPresetRequest(DualMABacktestReqVO reqVO) {
+        StrategyConfig.DualMa cfg = strategyConfigService.getDualMa();
         return isPresetMarket(reqVO.getMarket())
-                && isPresetMa(reqVO.getMaShort())
-                && isPresetMa(reqVO.getMaLong())
+                && contains(cfg.getMaShort(), reqVO.getMaShort())
+                && contains(cfg.getMaLong(), reqVO.getMaLong())
                 && reqVO.getMaShort() < reqVO.getMaLong()
-                && isPresetRecentYears(reqVO.getRecentYears());
+                && contains(cfg.getYears(), reqVO.getRecentYears());
     }
 
     public boolean isMomentumPresetRequest(MomentumBacktestReqVO reqVO) {
+        StrategyConfig.Momentum cfg = strategyConfigService.getMomentum();
         return isPresetMarket(reqVO.getMarket())
-                && isPresetMomentumLookbackDays(reqVO.getLookbackDays())
-                && isPresetRecentYears(reqVO.getRecentYears());
+                && contains(cfg.getLookback(), reqVO.getLookbackDays())
+                && contains(cfg.getYears(), reqVO.getRecentYears());
     }
 
     public boolean isMacdPresetRequest(MacdBacktestReqVO reqVO) {
+        StrategyConfig.Macd cfg = strategyConfigService.getMacd();
         return isPresetMarket(reqVO.getMarket())
-                && Integer.valueOf(PRESET_MACD_FAST_PERIOD).equals(reqVO.getFastPeriod())
-                && Integer.valueOf(PRESET_MACD_SLOW_PERIOD).equals(reqVO.getSlowPeriod())
-                && Integer.valueOf(PRESET_MACD_SIGNAL_PERIOD).equals(reqVO.getSignalPeriod())
-                && isPresetRecentYears(reqVO.getRecentYears());
+                && cfg.getFast() == reqVO.getFastPeriod()
+                && cfg.getSlow() == reqVO.getSlowPeriod()
+                && cfg.getSignal() == reqVO.getSignalPeriod()
+                && contains(cfg.getYears(), reqVO.getRecentYears());
     }
 
     public boolean isGridPresetRequest(GridBacktestReqVO reqVO) {
+        StrategyConfig.Grid cfg = strategyConfigService.getGrid();
         return isPresetMarket(reqVO.getMarket())
-                && PRESET_GRID_RATE.compareTo(reqVO.getGridRate()) == 0
-                && Integer.valueOf(PRESET_GRID_COUNT).equals(reqVO.getGridCount())
-                && isPresetRecentYears(reqVO.getRecentYears());
+                && BigDecimal.valueOf(cfg.getRate()).compareTo(reqVO.getGridRate()) == 0
+                && Integer.valueOf(cfg.getCount()).equals(reqVO.getGridCount())
+                && contains(cfg.getYears(), reqVO.getRecentYears());
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -415,15 +414,16 @@ public class StockStrategySnapshotService {
             var historyMap = dualMovingAverageStrategy.groupHistoriesByCode(histories);
             List<StockStrategyDualMaBacktestSnapshot> snapshots = new ArrayList<>();
             TTest tTest = new TTest();
+            StrategyConfig.DualMa dualMaCfg = strategyConfigService.getDualMa();
 
             for (StockQuote stock : batch) {
                 List<StockQuoteHistoryProjection> stockHistories = historyMap.getOrDefault(stock.getCode(), Collections.emptyList());
                 BigDecimal[] closePrices = dualMovingAverageStrategy.extractClosePrices(stockHistories);
 
-                for (int recentYears : PRESET_RECENT_YEARS) {
-                    for (int maShort : PRESET_MA_OPTIONS) {
+                for (int recentYears : dualMaCfg.getYears()) {
+                    for (int maShort : dualMaCfg.getMaShort()) {
                         BigDecimal maShortDecimal = BigDecimal.valueOf(maShort);
-                        for (int maLong : PRESET_MA_OPTIONS) {
+                        for (int maLong : dualMaCfg.getMaLong()) {
                             if (maShort >= maLong) {
                                 continue;
                             }
@@ -469,13 +469,14 @@ public class StockStrategySnapshotService {
             var historyMap = momentumStrategy.groupHistoriesByCode(histories);
             List<StockStrategyMomentumBacktestSnapshot> snapshots = new ArrayList<>();
             TTest tTest = new TTest();
+            StrategyConfig.Momentum momentumCfg = strategyConfigService.getMomentum();
 
             for (StockQuote stock : batch) {
                 List<StockQuoteHistoryProjection> stockHistories = historyMap.getOrDefault(stock.getCode(), Collections.emptyList());
                 BigDecimal[] closePrices = momentumStrategy.extractClosePrices(stockHistories);
 
-                for (int recentYears : PRESET_RECENT_YEARS) {
-                    for (int lookbackDays : PRESET_MOMENTUM_LOOKBACK_DAY_OPTIONS) {
+                for (int recentYears : momentumCfg.getYears()) {
+                    for (int lookbackDays : momentumCfg.getLookback()) {
                         StockTradeBacktestVO vo = momentumStrategy.backtestSingle(
                                 stock, closePrices, lookbackDays, recentYears, tTest
                         );
@@ -516,15 +517,16 @@ public class StockStrategySnapshotService {
             var historyMap = macdStrategy.groupHistoriesByCode(histories);
             List<StockStrategyMacdBacktestSnapshot> snapshots = new ArrayList<>();
             TTest tTest = new TTest();
+            StrategyConfig.Macd macdCfg = strategyConfigService.getMacd();
 
             for (StockQuote stock : batch) {
                 BigDecimal[] closePrices = macdStrategy.extractClosePrices(
                         historyMap.getOrDefault(stock.getCode(), Collections.emptyList())
                 );
-                for (int recentYears : PRESET_RECENT_YEARS) {
+                for (int recentYears : macdCfg.getYears()) {
                     StockTradeBacktestVO vo = macdStrategy.backtestSingle(
-                            stock, closePrices, PRESET_MACD_FAST_PERIOD, PRESET_MACD_SLOW_PERIOD,
-                            PRESET_MACD_SIGNAL_PERIOD, recentYears, tTest
+                            stock, closePrices, macdCfg.getFast(), macdCfg.getSlow(),
+                            macdCfg.getSignal(), recentYears, tTest
                     );
                     snapshots.add(toSnapshot(batchNo, market, recentYears, vo));
                 }
@@ -552,14 +554,16 @@ public class StockStrategySnapshotService {
             var historyMap = gridTradingStrategy.groupHistoriesByCode(histories);
             List<StockStrategyGridBacktestSnapshot> snapshots = new ArrayList<>();
             TTest tTest = new TTest();
+            StrategyConfig.Grid gridCfg = strategyConfigService.getGrid();
+            BigDecimal gridRate = BigDecimal.valueOf(gridCfg.getRate()).divide(HUNDRED);
 
             for (StockQuote stock : batch) {
                 BigDecimal[] closePrices = gridTradingStrategy.extractClosePrices(
                         historyMap.getOrDefault(stock.getCode(), Collections.emptyList())
                 );
-                for (int recentYears : PRESET_RECENT_YEARS) {
+                for (int recentYears : gridCfg.getYears()) {
                     StockTradeBacktestVO vo = gridTradingStrategy.backtestSingle(
-                            stock, closePrices, PRESET_GRID_RATE, PRESET_GRID_COUNT, recentYears, tTest
+                            stock, closePrices, gridRate, gridCfg.getCount(), recentYears, tTest
                     );
                     snapshots.add(toGridSnapshot(batchNo, market, recentYears, vo));
                 }
@@ -660,14 +664,15 @@ public class StockStrategySnapshotService {
             int recentYears,
             StockTradeBacktestVO vo
     ) {
+        StrategyConfig.Macd macdCfg = strategyConfigService.getMacd();
         StockStrategyMacdBacktestSnapshot snapshot = new StockStrategyMacdBacktestSnapshot();
         snapshot.setBatchNo(batchNo);
         snapshot.setMarket(market);
         snapshot.setCode(vo.getCode());
         snapshot.setName(vo.getName());
-        snapshot.setFastPeriod(PRESET_MACD_FAST_PERIOD);
-        snapshot.setSlowPeriod(PRESET_MACD_SLOW_PERIOD);
-        snapshot.setSignalPeriod(PRESET_MACD_SIGNAL_PERIOD);
+        snapshot.setFastPeriod(macdCfg.getFast());
+        snapshot.setSlowPeriod(macdCfg.getSlow());
+        snapshot.setSignalPeriod(macdCfg.getSignal());
         snapshot.setRecentYears(recentYears);
         snapshot.setTotalReturn(vo.getTotalReturn());
         snapshot.setTradeCount(vo.getTradeCount());
@@ -694,13 +699,14 @@ public class StockStrategySnapshotService {
             int recentYears,
             StockTradeBacktestVO vo
     ) {
+        StrategyConfig.Grid gridCfg = strategyConfigService.getGrid();
         StockStrategyGridBacktestSnapshot snapshot = new StockStrategyGridBacktestSnapshot();
         snapshot.setBatchNo(batchNo);
         snapshot.setMarket(market);
         snapshot.setCode(vo.getCode());
         snapshot.setName(vo.getName());
-        snapshot.setGridRate(PRESET_GRID_RATE);
-        snapshot.setGridCount(PRESET_GRID_COUNT);
+        snapshot.setGridRate(BigDecimal.valueOf(gridCfg.getRate()).divide(HUNDRED));
+        snapshot.setGridCount(gridCfg.getCount());
         snapshot.setRecentYears(recentYears);
         snapshot.setTotalReturn(vo.getTotalReturn());
         snapshot.setTradeCount(vo.getTradeCount());
@@ -972,36 +978,12 @@ public class StockStrategySnapshotService {
         return value != null && Double.isFinite(value) ? value : null;
     }
 
-    private boolean isPresetMa(Integer ma) {
-        if (ma == null) {
+    private boolean contains(List<Integer> options, Integer value) {
+        if (options == null || value == null) {
             return false;
         }
-        for (int preset : PRESET_MA_OPTIONS) {
-            if (preset == ma) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean isPresetRecentYears(Integer recentYears) {
-        if (recentYears == null) {
-            return false;
-        }
-        for (int preset : PRESET_RECENT_YEARS) {
-            if (preset == recentYears) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean isPresetMomentumLookbackDays(Integer lookbackDays) {
-        if (lookbackDays == null) {
-            return false;
-        }
-        for (int preset : PRESET_MOMENTUM_LOOKBACK_DAY_OPTIONS) {
-            if (preset == lookbackDays) {
+        for (Integer opt : options) {
+            if (opt != null && opt.equals(value)) {
                 return true;
             }
         }

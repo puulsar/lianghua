@@ -19,6 +19,9 @@ public class StockFundInfoPageReqVO {
     @Schema(description = "基金类型")
     private String fundType;
 
+    @Schema(description = "基金大类型（前缀匹配，如 股票型 / QDII）")
+    private String fundTypePrefix;
+
     @Schema(description = "是否包含美股")
     private Boolean includeUsStock;
 

@@ -46,3 +46,15 @@ aktools_log.log.*
 
 ### 运行期本地数据（MySQL 数据目录等，不入库）###
 .runtime/
+
+### Docker 部署的本地环境变量（含密码，不入库）###
+.env
+
+### 本机服务管理器
+aquant-services.ps1
+
+### 零构建部署用的预构建产物（本地生成，不入库）
+prebuilt/
+
+### 前端构建产物
+aquant-frontend/dist/

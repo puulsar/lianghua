@@ -1,0 +1,11 @@
+# 部署相关文件强制 LF。
+# 原因：Windows 上 checkout 时 core.autocrlf 会把它们转成 CRLF，
+# 而 Dockerfile 的续行符（行尾 `\`）后面跟一个 `\r` 就不再是续行，
+# 在 Linux/NAS 上 docker build 会报很难懂的错误。shell 脚本同理。
+deploy/*.Dockerfile   text eol=lf
+Dockerfile            text eol=lf
+*.Dockerfile          text eol=lf
+deploy/nginx.conf     text eol=lf
+*.conf                text eol=lf
+docker-compose*.yml   text eol=lf
+*.sh                  text eol=lf

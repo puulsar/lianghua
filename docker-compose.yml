@@ -1,0 +1,87 @@
+name: aquant
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: aquant-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --default-time-zone=+08:00
+      - --innodb-buffer-pool-size=256M
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-aquant_root_change_me}
+      MYSQL_DATABASE: stock
+      MYSQL_USER: test
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-testtest}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ${DATA_ROOT:-./.runtime/docker}/mysql:/var/lib/mysql
+      - ./stock.sql:/docker-entrypoint-initdb.d/01-stock.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+    networks: [aquant]
+
+  aktools:
+    build:
+      context: .
+      dockerfile: deploy/aktools.Dockerfile
+    image: aquant-aktools:local
+    container_name: aquant-aktools
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/docs >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks: [aquant]
+
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/backend.Dockerfile
+    image: aquant-backend:local
+    container_name: aquant-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      aktools:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      JAVA_OPTS: ${JAVA_OPTS:--Xms256m -Xmx1024m}
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/stock?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: test
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-testtest}
+      AKSHARE_ADDRESS: http://aktools:8080
+      SPRING_MAIL_HOST: ${MAIL_HOST:-smtp.qq.com}
+      SPRING_MAIL_USERNAME: ${MAIL_USERNAME:-your-email@qq.com}
+      SPRING_MAIL_PASSWORD: ${MAIL_PASSWORD:-your-smtp-auth-code}
+    ports:
+      - "${BACKEND_PORT:-8084}:8084"
+    networks: [aquant]
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    image: aquant-web:local
+    container_name: aquant-web
+    restart: unless-stopped
+    depends_on: [backend]
+    ports:
+      - "${WEB_PORT:-8081}:80"
+    networks: [aquant]
+
+networks:
+  aquant:
+    driver: bridge

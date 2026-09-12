@@ -37,6 +37,7 @@ import com.brotherc.aquant.stock.service.StockShareChangeService;
 import com.brotherc.aquant.stock.service.StockTradeCalendarService;
 import com.brotherc.aquant.strategy.service.StockStrategySnapshotService;
 import com.brotherc.aquant.sync.service.StockSyncService;
+import com.brotherc.aquant.sys.service.SysConfigService;
 import com.brotherc.aquant.common.utils.StockHelper;
 import com.brotherc.aquant.common.utils.StockUtils;
 import lombok.RequiredArgsConstructor;
@@ -56,6 +57,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
 @Component
@@ -99,22 +101,51 @@ public class StockSyncTask {
     private final StockIndustryBoardHistoryRepository stockIndustryBoardHistoryRepository;
     private final StockFundInfoRepository stockFundInfoRepository;
 
+    private final SysConfigService sysConfigService;
+
+    /**
+     * 全量同步并发锁：防止手动触发与启动时自动同步同时执行
+     */
+    private final AtomicBoolean running = new AtomicBoolean(false);
+
     /**
      * 项目完全启动后，异步执行一次
      */
     @Async
     @EventListener(ApplicationReadyEvent.class)
     public void onApplicationReady() {
-        clearDelistedStockData();
-        stockTradeCalendarService.syncAStockNonTradeDays();
-        syncStackDtaLatest();
-        stockValuationMetricsService.refreshValuationMetrics();
-        stockDupontAnalysisService.refreshDupontAnalysis();
-        stockGrowthMetricsService.refreshGrowthMetrics();
-        stockStrategySnapshotService.refreshDualMaBacktestSnapshots();
-        stockStrategySnapshotService.refreshMomentumBacktestSnapshots();
-        stockStrategySnapshotService.refreshMacdBacktestSnapshots();
-        stockStrategySnapshotService.refreshGridBacktestSnapshots();
+        if (!sysConfigService.getBoolean(SysConfigService.AUTO_SYNC)) {
+            log.info("自动同步已关闭，跳过启动同步");
+            return;
+        }
+        runFullSync();
+    }
+
+    /**
+     * 手动触发全量/增量同步（可复用，带并发锁）。
+     *
+     * @return true 表示本次同步已开始；false 表示已有同步任务在执行中
+     */
+    public boolean runFullSync() {
+        if (!running.compareAndSet(false, true)) {
+            log.info("同步任务已在执行中，本次跳过");
+            return false;
+        }
+        try {
+            clearDelistedStockData();
+            stockTradeCalendarService.syncAStockNonTradeDays();
+            syncStackDtaLatest();
+            stockValuationMetricsService.refreshValuationMetrics();
+            stockDupontAnalysisService.refreshDupontAnalysis();
+            stockGrowthMetricsService.refreshGrowthMetrics();
+            stockStrategySnapshotService.refreshDualMaBacktestSnapshots();
+            stockStrategySnapshotService.refreshMomentumBacktestSnapshots();
+            stockStrategySnapshotService.refreshMacdBacktestSnapshots();
+            stockStrategySnapshotService.refreshGridBacktestSnapshots();
+            return true;
+        } finally {
+            running.set(false);
+        }
     }
 
     private void syncStackDtaLatest() {
@@ -966,10 +997,11 @@ public class StockSyncTask {
         boolean shouldRefreshLatestFund = shouldRefreshLatestFund(stockSync, now);
 
         Map<String, StockFundInfo> localHistoryTargets = stockFundInfoRepository.findAll().stream()
+                .filter(stockFundInfo -> stockFundInfo != null && StringUtils.isNotBlank(stockFundInfo.getFundCode()))
                 .filter(stockFundInfo -> StockUtils.isOverseasFund(stockFundInfo.getFundType(), stockFundInfo.getFundName()))
                 .collect(LinkedHashMap::new,
                         (map, stockFundInfo) ->
-                                map.put(stockFundInfo.getFundCode(), stockFundInfo),
+                                map.putIfAbsent(stockFundInfo.getFundCode(), stockFundInfo),
                         Map::putAll
                 );
 
@@ -997,9 +1029,10 @@ public class StockSyncTask {
 
         if (latestFundRefreshed) {
             localHistoryTargets = stockFundInfoRepository.findAll().stream()
-                    .filter(stockFundInfo -> StockUtils.isOverseasFund(stockFundInfo.getFundType(), stockFundInfo.getFundName()))
+                    .filter(stockFundInfo -> stockFundInfo != null && StringUtils.isNotBlank(stockFundInfo.getFundCode()))
+                .filter(stockFundInfo -> StockUtils.isOverseasFund(stockFundInfo.getFundType(), stockFundInfo.getFundName()))
                     .collect(LinkedHashMap::new,
-                            (map, stockFundInfo) -> map.put(stockFundInfo.getFundCode(), stockFundInfo),
+                            (map, stockFundInfo) -> map.putIfAbsent(stockFundInfo.getFundCode(), stockFundInfo),
                             Map::putAll);
         }
 

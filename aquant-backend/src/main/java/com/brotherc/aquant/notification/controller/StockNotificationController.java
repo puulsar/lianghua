@@ -30,6 +30,13 @@ public class StockNotificationController {
         return ResponseDTO.success(notificationService.getByUserIdAndStockCode(userId, stockCode, assetType));
     }
 
+    @Operation(summary = "获取当前用户全部提醒设置")
+    @GetMapping("/listAll")
+    public ResponseDTO<List<StockNotificationVO>> listAll() {
+        Long userId = UserContext.requireCurrentUserId();
+        return ResponseDTO.success(notificationService.listByUser(userId));
+    }
+
     @Operation(summary = "保存提醒设置")
     @PostMapping("/save")
     public ResponseDTO<Void> save(@RequestBody @Valid StockNotificationReqVO reqVO) {

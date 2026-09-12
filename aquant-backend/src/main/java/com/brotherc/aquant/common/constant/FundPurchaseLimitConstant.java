@@ -14,6 +14,11 @@ public final class FundPurchaseLimitConstant {
     public static final String STATUS_OPEN = "OPEN";
     public static final String STATUS_LIMITED = "LIMITED";
     public static final String STATUS_SUSPENDED = "SUSPENDED";
+
+    /** 全市场基金官方申购状态（来自天天基金 fund_purchase_em 列表） */
+    public static final String SOURCE_EM_FUND = "EM_FUND";
+    public static final String SOURCE_EM_FUND_NAME = "天天基金·全市场";
+
     public static final String SYNC_SUCCESS = "SUCCESS";
     public static final String SYNC_IGNORED = "IGNORED";
     public static final String SYNC_FAILED = "FAILED";

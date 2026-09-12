@@ -23,6 +23,45 @@
 
     <!-- 左侧列表栏 -->
     <div class="stock-terminal-sidebar">
+      <!-- 顶部：类型切换（大类 + 细分），独立一层 -->
+      <div class="fund-type-picker">
+        <div class="sidebar-type-bar">
+          <span class="sidebar-type-bar-title">大类</span>
+          <button
+            type="button"
+            class="sidebar-chip"
+            :class="{ 'sidebar-chip--active': selectedBigCat === undefined }"
+            @click="selectBigCat(undefined)"
+          >全部大类</button>
+          <button
+            v-for="cat in bigCategories"
+            :key="cat"
+            type="button"
+            class="sidebar-chip"
+            :class="{ 'sidebar-chip--active': selectedBigCat === cat }"
+            @click="selectBigCat(cat)"
+          >{{ cat }}</button>
+        </div>
+
+        <div class="sidebar-type-bar" v-if="selectedBigCat && selectedBigSubs.length">
+          <span class="sidebar-type-bar-title">细分</span>
+          <button
+            type="button"
+            class="sidebar-chip"
+            :class="{ 'sidebar-chip--active': queryParams.fundType === undefined }"
+            @click="selectBigCat(selectedBigCat)"
+          >全部</button>
+          <button
+            v-for="s in selectedBigSubs"
+            :key="s.value"
+            type="button"
+            class="sidebar-chip"
+            :class="{ 'sidebar-chip--active': queryParams.fundType === s.value }"
+            @click="selectSmallType(s.value)"
+          >{{ s.short }}</button>
+        </div>
+      </div>
+
       <!-- 顶部搜索框与筛选 -->
       <div class="sidebar-search-box">
         <a-input
@@ -38,18 +77,8 @@
           </template>
         </a-input>
 
-        <!-- 紧凑分类筛选与排序 -->
+        <!-- 紧凑排序与过滤 -->
         <div class="sidebar-filter-row">
-          <a-select
-            v-model:value="queryParams.fundType"
-            placeholder="全部类型"
-            allow-clear
-            size="small"
-            class="sidebar-type-select"
-            :options="fundTypeOptions"
-            @change="onSearch"
-          />
-
           <!-- 排序下拉 -->
           <a-dropdown trigger="['click']" placement="bottomRight">
             <a-button
@@ -438,9 +467,13 @@ const queryParams = reactive<FundInfoPageReqVO>({
   fundCode: '',
   fundName: '',
   fundType: undefined,
+  fundTypePrefix: undefined,
   includeUsStock: false,
   sort: undefined
 });
+
+// 当前选中的大类（undefined 表示“全部”）
+const selectedBigCat = ref<string | undefined>(undefined);
 
 // 排序状态
 const currentSortKey = ref<string>('default');
@@ -594,6 +627,48 @@ const loadData = async () => {
 
 const selectFund = (fund: FundInfoVO) => {
   selectedFund.value = fund;
+};
+
+// 大类列表与所选大类的细分按钮
+const typeGroups = computed(() => {
+  const order: string[] = [];
+  const map = new Map<string, { value: string; short: string }[]>();
+  for (const opt of fundTypeOptions.value) {
+    if (opt.value === undefined || opt.value === '') continue;
+    const v = opt.value;
+    const dash = v.indexOf('-');
+    const cat = dash > 0 ? v.substring(0, dash) : v;
+    const short = dash > 0 ? v.substring(dash + 1) : v;
+    if (!map.has(cat)) {
+      map.set(cat, []);
+      order.push(cat);
+    }
+    map.get(cat)!.push({ value: v, short });
+  }
+  order.sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  return order.map((cat) => ({ cat, items: map.get(cat)! }));
+});
+const bigCategories = computed(() => typeGroups.value.map((g) => g.cat));
+const selectedBigSubs = computed(() => {
+  const g = typeGroups.value.find((x) => x.cat === selectedBigCat.value);
+  return g ? g.items : [];
+});
+
+// 点击大类：按前缀过滤该大类，并展示其细分
+const selectBigCat = (cat?: string) => {
+  selectedBigCat.value = cat || undefined;
+  pagination.current = 1;
+  queryParams.fundType = undefined;
+  queryParams.fundTypePrefix = cat || undefined;
+  loadData();
+};
+
+// 点击细分：精确过滤该小类
+const selectSmallType = (value: string) => {
+  queryParams.fundType = value;
+  queryParams.fundTypePrefix = undefined;
+  pagination.current = 1;
+  loadData();
 };
 
 const onSearch = () => {
@@ -823,14 +898,61 @@ onMounted(() => {
   border-color: #3b82f6;
 }
 
+/* 类型切换（独立一层，换行铺开，按钮加大） */
+.fund-type-picker {
+  background: #ffffff;
+  border: 1px solid #edf2f7;
+  border-radius: 10px;
+  padding: 8px;
+  margin-bottom: 10px;
+}
+
+.sidebar-type-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidebar-type-bar + .sidebar-type-bar {
+  margin-top: 6px;
+}
+
+.sidebar-type-bar-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #94a3b8;
+  user-select: none;
+}
+
+.sidebar-chip {
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #475569;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1.4;
+}
+
+.sidebar-chip:hover {
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+
+.sidebar-chip--active {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #ffffff;
+  font-weight: 600;
+}
+
 .sidebar-filter-row {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.sidebar-type-select {
-  flex: 1;
 }
 
 .sidebar-filter-btn {

@@ -176,6 +176,7 @@ import {
   HeartOutlined,
   LogoutOutlined,
   LoginOutlined,
+  UserOutlined,
   MailOutlined,
   MenuOutlined,
   FileTextOutlined

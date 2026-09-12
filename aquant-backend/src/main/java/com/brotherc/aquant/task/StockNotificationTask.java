@@ -10,6 +10,7 @@ import com.brotherc.aquant.fund.repository.StockFundNetValueRepository;
 import com.brotherc.aquant.notification.repository.StockNotificationRepository;
 import com.brotherc.aquant.notification.service.StockNotificationService;
 import com.brotherc.aquant.integration.tencent.service.TencentFinanceService;
+import com.brotherc.aquant.sys.service.SysConfigService;
 import com.brotherc.aquant.common.utils.StockHelper;
 import com.brotherc.aquant.common.utils.StockUtils;
 import lombok.RequiredArgsConstructor;
@@ -35,6 +36,7 @@ public class StockNotificationTask {
     private final TencentFinanceService tencentFinanceService;
     private final StockFundInfoRepository stockFundInfoRepository;
     private final StockFundNetValueRepository stockFundNetValueRepository;
+    private final SysConfigService sysConfigService;
 
     /**
      * 股票通知轮询任务
@@ -42,6 +44,9 @@ public class StockNotificationTask {
      */
     @Scheduled(initialDelay = 0, fixedRate = 600000)
     public void checkNotifications() {
+        if (!sysConfigService.getBoolean(SysConfigService.NOTIFICATION_ENABLED)) {
+            return;
+        }
         checkStockNotifications();
         checkFundNotifications();
     }

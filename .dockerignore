@@ -1,0 +1,23 @@
+.git
+.github
+.workbuddy
+.trae
+.runtime
+.vscode
+.idea
+
+# 本地依赖与构建产物，不要塞进镜像
+**/node_modules
+**/target
+**/dist
+
+screenshots
+*.log
+aktools_log.log*
+
+# 本机专用启动脚本
+start-aquant.bat
+start-aquant.sh
+aquant-services.ps1
+
+.env

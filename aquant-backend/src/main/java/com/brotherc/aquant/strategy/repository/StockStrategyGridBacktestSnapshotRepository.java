@@ -9,6 +9,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 @Repository
 public interface StockStrategyGridBacktestSnapshotRepository extends
@@ -22,6 +23,18 @@ public interface StockStrategyGridBacktestSnapshotRepository extends
             Integer gridCount,
             Integer recentYears
     );
+
+    long countByBatchNo(Long batchNo);
+
+    @Query(value = "SELECT COALESCE(reliability, '未知') AS r, COUNT(*) AS c FROM stock_strategy_grid_backtest_snapshot "
+            + "WHERE batch_no = :batchNo GROUP BY reliability", nativeQuery = true)
+    List<Object[]> reliabilityDistribution(@Param("batchNo") Long batchNo);
+
+    @Query(value = "SELECT grid_rate, grid_count, recent_years, COUNT(*) AS cnt, "
+            + "AVG(total_return) AS avgRet, AVG(win_rate) AS avgWin "
+            + "FROM stock_strategy_grid_backtest_snapshot WHERE batch_no = :batchNo "
+            + "GROUP BY grid_rate, grid_count, recent_years ORDER BY cnt DESC LIMIT 6", nativeQuery = true)
+    List<Object[]> topCombos(@Param("batchNo") Long batchNo);
 
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query(value = "DELETE FROM stock_strategy_grid_backtest_snapshot WHERE batch_no <> :batchNo LIMIT :limit", nativeQuery = true)

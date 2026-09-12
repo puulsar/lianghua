@@ -158,6 +158,10 @@ public class StockFundInfoService {
                 predicates.add(cb.equal(root.get(FUND_TYPE), reqVO.getFundType()));
             }
 
+            if (StringUtils.isNotBlank(reqVO.getFundTypePrefix())) {
+                predicates.add(cb.like(root.get(FUND_TYPE), reqVO.getFundTypePrefix().trim() + "%"));
+            }
+
             if (Boolean.TRUE.equals(reqVO.getIncludeUsStock())) {
                 List<Predicate> usStockPredicates = new ArrayList<>();
                 String[] keywords = {"QDII", "纳斯达克", "标普", "美国", "全球", "海外", "美元"};

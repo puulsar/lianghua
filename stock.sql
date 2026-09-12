@@ -686,6 +686,17 @@ CREATE TABLE `stock_sync` (
   UNIQUE KEY `uk_stock_sync_name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='股票同步配置';
 
+DROP TABLE IF EXISTS `sys_config`;
+CREATE TABLE `sys_config` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `name` varchar(50) NOT NULL COMMENT '配置键',
+  `value` varchar(64) DEFAULT NULL COMMENT '配置值',
+  `created_at` datetime DEFAULT NULL COMMENT '创建时间',
+  `updated_at` datetime DEFAULT NULL COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sys_config_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='系统配置';
+
 DROP TABLE IF EXISTS `stock_trade_calendar`;
 CREATE TABLE `stock_trade_calendar` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -802,6 +813,7 @@ CREATE TABLE `sys_user` (
   `nickname` varchar(100) DEFAULT NULL COMMENT '昵称',
   `email` varchar(100) DEFAULT NULL COMMENT '邮箱',
   `status` tinyint NOT NULL DEFAULT '1' COMMENT '状态：1=启用, 0=禁用',
+  `role` varchar(20) NOT NULL DEFAULT 'user' COMMENT '角色：admin=超级管理员, user=普通用户',
   `created_at` datetime DEFAULT NULL COMMENT '创建时间',
   `updated_at` datetime DEFAULT NULL COMMENT '更新时间',
   PRIMARY KEY (`id`),

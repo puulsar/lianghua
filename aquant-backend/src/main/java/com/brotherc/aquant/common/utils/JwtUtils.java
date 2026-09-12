@@ -43,14 +43,24 @@ public class JwtUtils {
     /**
      * 生成 JWT Token
      */
-    public static String generateToken(Long userId, String username) {
+    public static String generateToken(Long userId, String username, String role) {
+        String safeRole = role == null || role.isBlank() ? "user" : role;
         return JWT.create()
                 .withIssuer(ISSUER)
                 .withClaim("userId", userId)
                 .withClaim("username", username)
+                .withClaim("role", safeRole)
                 .withIssuedAt(new Date())
                 .withExpiresAt(new Date(System.currentTimeMillis() + expireMs))
                 .sign(Algorithm.HMAC256(secret));
+    }
+
+    /**
+     * 从 Token 获取角色
+     */
+    public static String getRole(String token) {
+        DecodedJWT jwt = verifyToken(token);
+        return jwt != null ? jwt.getClaim("role").asString() : null;
     }
 
     /**

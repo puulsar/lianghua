@@ -5,10 +5,12 @@ import com.brotherc.aquant.common.exception.ExceptionEnum;
 import com.brotherc.aquant.common.model.dto.ResponseDTO;
 import com.brotherc.aquant.common.utils.JwtUtils;
 import com.brotherc.aquant.common.utils.UserContext;
+import com.brotherc.aquant.sys.service.SysConfigService;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import jakarta.servlet.*;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.util.AntPathMatcher;
@@ -21,9 +23,12 @@ import java.util.List;
  */
 @Component
 @Order(1)
+@RequiredArgsConstructor
 public class JwtAuthFilter implements Filter {
 
     private static final AntPathMatcher PATH_MATCHER = new AntPathMatcher();
+
+    private final SysConfigService sysConfigService;
 
     /**
      * 无需登录的路径（支持 Ant 风格匹配）。
@@ -56,7 +61,13 @@ public class JwtAuthFilter implements Filter {
             "/webjars/**",
             "/druid/**",
             "/error",
-            "/favicon.ico"
+            "/favicon.ico",
+
+            // --- 后端内置管理 SPA 静态资源 ---
+            "/",
+            "/index.html",
+            "/app.js",
+            "/app.css"
     );
 
     @Override
@@ -67,6 +78,12 @@ public class JwtAuthFilter implements Filter {
         HttpServletResponse response = (HttpServletResponse) servletResponse;
 
         try {
+            // 文档/监控访问开关：关闭时对应路径一律拒绝
+            if (isFeatureBlocked(request)) {
+                writeForbidden(response);
+                return;
+            }
+
             // 白名单直接放行（仍可尝试解析 Token 设置上下文，便于公开接口区分匿名/登录用户）
             if (isWhitelisted(request)) {
                 trySetUserContext(request);
@@ -98,7 +115,8 @@ public class JwtAuthFilter implements Filter {
 
             UserContext.set(
                     JwtUtils.getUserId(token),
-                    JwtUtils.getUsername(token)
+                    JwtUtils.getUsername(token),
+                    JwtUtils.getRole(token)
             );
 
             chain.doFilter(servletRequest, servletResponse);
@@ -123,6 +141,34 @@ public class JwtAuthFilter implements Filter {
     }
 
     /**
+     * 文档 / 监控访问开关：关闭时对应路径不应被访问。
+     */
+    private boolean isFeatureBlocked(HttpServletRequest request) {
+        String path = request.getRequestURI();
+        String context = request.getContextPath();
+        if (context != null && !context.isEmpty() && path.startsWith(context)) {
+            path = path.substring(context.length());
+        }
+        if (PATH_MATCHER.match("/doc.html", path)
+                || PATH_MATCHER.match("/v3/api-docs/**", path)
+                || PATH_MATCHER.match("/swagger-ui/**", path)
+                || PATH_MATCHER.match("/swagger-resources/**", path)) {
+            return !sysConfigService.getBoolean(SysConfigService.DOCS_ENABLED);
+        }
+        if (PATH_MATCHER.match("/druid/**", path)) {
+            return !sysConfigService.getBoolean(SysConfigService.DRUID_ENABLED);
+        }
+        return false;
+    }
+
+    private void writeForbidden(HttpServletResponse response) throws IOException {
+        response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+        response.setContentType("application/json;charset=UTF-8");
+        ResponseDTO<?> errDTO = ResponseDTO.fail(ExceptionEnum.SYS_CHECK_ERROR.getCode(), "该功能已关闭", null);
+        response.getWriter().write(errDTO.toString());
+    }
+
+    /**
      * 白名单场景下尝试解析 Token，解析失败静默忽略。
      */
     private void trySetUserContext(HttpServletRequest request) {
@@ -134,7 +180,7 @@ public class JwtAuthFilter implements Filter {
         try {
             DecodedJWT jwt = JwtUtils.verifyToken(token);
             if (jwt != null) {
-                UserContext.set(JwtUtils.getUserId(token), JwtUtils.getUsername(token));
+                UserContext.set(JwtUtils.getUserId(token), JwtUtils.getUsername(token), JwtUtils.getRole(token));
             }
         } catch (BusinessException ignored) {
             // 白名单场景下 Token 过期等失败不阻断请求
