@@ -1,37 +1,68 @@
-# AQuant unified service manager (all components live under D:\AQuant, single sandbox)
+# AQuant unified service manager (Windows / PowerShell)
+#
+# Starts MySQL + aktools + backend + frontend as one managed set.
+#
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File aquant-services.ps1 start    # start all + monitor
-#   powershell -ExecutionPolicy Bypass -File aquant-services.ps1 stop     # stop all
-#   powershell -ExecutionPolicy Bypass -File aquant-services.ps1 status   # show status
+#   powershell -NoProfile -ExecutionPolicy Bypass -File aquant-services.ps1 start
+#   powershell -NoProfile -ExecutionPolicy Bypass -File aquant-services.ps1 start -NoMonitor
+#   powershell -NoProfile -ExecutionPolicy Bypass -File aquant-services.ps1 stop
+#   powershell -NoProfile -ExecutionPolicy Bypass -File aquant-services.ps1 status
+#
+# Tool locations are read from environment variables so this file stays
+# machine-independent. Put your own paths in a sibling file named
+# `aquant-services.local.ps1` (git-ignored) and it will be loaded automatically:
+#
+#   $env:MYSQL_HOME     = 'C:\Program Files\MySQL\MySQL Server 8.4'
+#   $env:JAVA_HOME      = '...\jdk-17'
+#   $env:MAVEN_HOME     = '...\apache-maven-3.9.16'
+#   $env:AQUANT_PYTHON  = '...\python.exe'      # interpreter with aktools+akshare
+#   $env:AQUANT_NODE_DIR= '...\node'            # dir containing npm.cmd
+#   $env:MYSQL_DATADIR  = '...\mysql\data'
+#
+# NOTE: keep this file ASCII-only. A non-ASCII byte here is read as GBK by
+# Windows PowerShell and breaks parsing.
 
-# ---- all runtime data kept under D:\AQuant so the whole stack runs inside one sandbox ----
-$env:MYSQL_HOME     = "C:\Program Files\MySQL\MySQL Server 8.4"
-$env:MYSQL_DATADIR  = "D:\AQuant\.runtime\mysql\data"
-$env:JAVA_HOME      = "C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot"
-$env:MAVEN_HOME     = "C:\Users\Admin\.workbuddy\binaries\maven\apache-maven-3.9.16"
-$env:PYTHON         = "C:\Users\Admin\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
-$env:NODE_DIR       = "C:\Users\Admin\.workbuddy\binaries\node\versions\22.22.2-2"
-$env:PROJECT        = "D:\AQuant"
+$ErrorActionPreference = 'Stop'
 
-$LogDir  = "D:\AQuant\.runtime\logs"
+# ---- project root: this script's own directory (no hard-coded path) ----
+if (-not $env:PROJECT) { $env:PROJECT = $PSScriptRoot }
+
+# ---- per-machine overrides (git-ignored, optional) ----
+$localFile = Join-Path $env:PROJECT 'aquant-services.local.ps1'
+if (Test-Path $localFile) { . $localFile }
+
+function Get-Setting([string]$name, [string]$default) {
+    $v = [Environment]::GetEnvironmentVariable($name)
+    if ([string]::IsNullOrWhiteSpace($v)) { return $default }
+    return $v
+}
+
+$MYSQL_HOME    = Get-Setting 'MYSQL_HOME'    'C:\Program Files\MySQL\MySQL Server 8.4'
+$JAVA_HOME     = Get-Setting 'JAVA_HOME'     ''
+$MAVEN_HOME    = Get-Setting 'MAVEN_HOME'    ''
+$PYTHON        = Get-Setting 'AQUANT_PYTHON' 'python'
+$NODE_DIR      = Get-Setting 'AQUANT_NODE_DIR' ''
+$MYSQL_DATADIR = Get-Setting 'MYSQL_DATADIR' (Join-Path $env:PROJECT '.runtime\mysql\data')
+
+$LogDir  = Join-Path $env:PROJECT '.runtime\logs'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$PidFile = Join-Path $LogDir "pids.json"
+$PidFile = Join-Path $LogDir 'pids.json'
 
 # ---- components ----
 $components = @(
-    @{ name="MySQL";    port=3306; exe="$env:MYSQL_HOME\bin\mysqld.exe"
-       args=@("--basedir=`"$env:MYSQL_HOME`"","--datadir=`"$env:MYSQL_DATADIR`"","--lc-messages-dir=`"$env:MYSQL_HOME\share`"","--port=3306","--console")
-       wd="$env:MYSQL_HOME"; health="port"; healthUrl=$null; extraPath=$null },
-    @{ name="aktools";  port=8080; exe="$env:PYTHON"; args=@("-m","aktools")
-       wd="$env:PROJECT"; health="http"; healthUrl="http://127.0.0.1:8080/docs"; extraPath=$null },
-    @{ name="backend";  port=8084; exe="$env:MAVEN_HOME\bin\mvn.cmd"; args=@("-B","spring-boot:run")
-       wd="$env:PROJECT\aquant-backend"; health="http"; healthUrl="http://127.0.0.1:8084/doc.html"; extraPath=$null },
-    @{ name="frontend"; port=5173; exe="$env:NODE_DIR\npm.cmd"; args=@("run","dev")
-       wd="$env:PROJECT\aquant-frontend"; health="http"; healthUrl="http://localhost:5173/"; extraPath="$env:NODE_DIR" }
+    @{ name='MySQL';    port=3306; exe="$MYSQL_HOME\bin\mysqld.exe"
+       args=@("--basedir=`"$MYSQL_HOME`"","--datadir=`"$MYSQL_DATADIR`"","--lc-messages-dir=`"$MYSQL_HOME\share`"","--port=3306","--console")
+       wd="$MYSQL_HOME"; health='port'; healthUrl=$null; extraPath=$null },
+    @{ name='aktools';  port=8080; exe="$PYTHON"; args=@('-m','aktools','--host','0.0.0.0','--port','8080')
+       wd="$env:PROJECT"; health='http'; healthUrl='http://127.0.0.1:8080/docs'; extraPath=$null },
+    @{ name='backend';  port=8084; exe="$MAVEN_HOME\bin\mvn.cmd"; args=@('-B','spring-boot:run')
+       wd="$env:PROJECT\aquant-backend"; health='http'; healthUrl='http://127.0.0.1:8084/doc.html'; extraPath=$null },
+    @{ name='frontend'; port=5173; exe="$NODE_DIR\npm.cmd"; args=@('run','dev')
+       wd="$env:PROJECT\aquant-frontend"; health='http'; healthUrl='http://localhost:5173/'; extraPath="$NODE_DIR" }
 )
 
 function Test-Healthy($c) {
-    if ($c.health -eq "port") {
+    if ($c.health -eq 'port') {
         return (Get-NetTCPConnection -State Listen -LocalPort $c.port -ErrorAction SilentlyContinue) -ne $null
     }
     try { $null = Invoke-WebRequest -Uri $c.healthUrl -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; return $true }
@@ -50,24 +81,52 @@ function Get-RunningPids {
     return @{}
 }
 
-function StartAll {
+function Test-Prerequisites {
+    $missing = @()
+    foreach ($c in $components) {
+        if ($c.exe -match '^\S*\\' -and -not (Test-Path $c.exe)) { $missing += "$($c.name): $($c.exe)" }
+    }
+    if ($missing.Count -gt 0) {
+        Write-Host 'Missing executables -- set the matching env vars (or aquant-services.local.ps1):'
+        $missing | ForEach-Object { Write-Host "  $_" }
+        Write-Host ''
+        Write-Host '  MYSQL_HOME / JAVA_HOME / MAVEN_HOME / AQUANT_PYTHON / AQUANT_NODE_DIR'
+        return $false
+    }
+    return $true
+}
+
+function StartAll([bool]$monitor) {
+    if (-not (Test-Prerequisites)) { exit 1 }
+
+    # Leaked host env vars would override Spring Boot's server.port and make the
+    # backend grab the host's own port instead of 8084 -- clear them first.
+    foreach ($v in 'SERVER__PORT','SERVER__HOST') {
+        if (Test-Path "Env:$v") { Remove-Item "Env:$v" -Force }
+    }
+
     $pids = @{}
     foreach ($c in $components) {
         if (Test-Healthy $c) { Write-Host "[skip] $($c.name) already up (port $($c.port))"; continue }
         Write-Host "[start] $($c.name) ..."
         $log = Join-Path $LogDir "$($c.name).log"
         $err = Join-Path $LogDir "$($c.name).err.log"
+        if ($c.extraPath) { $env:PATH = "$($c.extraPath);$env:PATH" }
         $proc = Start-Process -FilePath $c.exe -ArgumentList $c.args -WorkingDirectory $c.wd `
             -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -WindowStyle Hidden
         $pids[$c.name] = $proc.Id
         Write-Host "        PID=$($proc.Id)  log=$log"
     }
     $pids | ConvertTo-Json | Set-Content $PidFile -Encoding UTF8
-    Write-Host ""
-    Write-Host "AQuant unified sandbox started. Idle monitor running. Press Ctrl+C to stop monitoring."
-    Write-Host "  Frontend   http://localhost:5173"
-    Write-Host "  API docs   http://127.0.0.1:8084/doc.html"
-    Write-Host "  Data svc   http://127.0.0.1:8080/docs"
+    Write-Host ''
+    Write-Host 'AQuant started.'
+    Write-Host '  Frontend   http://localhost:5173'
+    Write-Host '  API docs   http://127.0.0.1:8084/doc.html'
+    Write-Host '  Data svc   http://127.0.0.1:8080/docs'
+
+    if (-not $monitor) { return }
+    Write-Host ''
+    Write-Host 'Monitoring (Ctrl+C stops monitoring, NOT the services).'
     while ($true) {
         Start-Sleep -Seconds 10
         foreach ($c in $components) {
@@ -87,17 +146,18 @@ function StopAll {
         } else { Write-Host "[stop] $($c.name) no recorded PID" }
     }
     Remove-Item $PidFile -ErrorAction SilentlyContinue
-    Write-Host "All components stopped."
+    Write-Host 'All components stopped.'
 }
 
-function Status { foreach ($c in $components) { $ok = Test-Healthy $c; Write-Host ("{0}`t{1}`tport {2}" -f ($(if($ok){"UP"}else{"DOWN"})), $c.name, $c.port) } }
+function Status { foreach ($c in $components) { $ok = Test-Healthy $c; Write-Host ("{0}`t{1}`tport {2}" -f ($(if($ok){'UP'}else{'DOWN'})), $c.name, $c.port) } }
 
-$env:PATH = "$env:NODE_DIR;$env:PATH"
+if ($NODE_DIR) { $env:PATH = "$NODE_DIR;$env:PATH" }
 
-if (-not $args) { Write-Host "Usage: aquant-services.ps1 <start|stop|status>"; exit 1 }
+if (-not $args) { Write-Host 'Usage: aquant-services.ps1 <start [-NoMonitor]|stop|status>'; exit 1 }
+$monitor = -not ($args -contains '-NoMonitor')
 switch ($args[0]) {
-    "start"  { StartAll }
-    "stop"   { StopAll }
-    "status" { Status }
+    'start'  { StartAll $monitor }
+    'stop'   { StopAll }
+    'status' { Status }
     default  { Write-Host "Unknown action: $($args[0]) (use start / stop / status)" }
 }
