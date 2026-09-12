@@ -4,7 +4,7 @@
       <!-- 左侧品牌区 -->
       <div class="brand-section">
         <div class="brand-content">
-          <div class="brand-logo"><line-chart-outlined class="brand-logo-icon" /> AQuant</div>
+          <div class="brand-logo"><line-chart-outlined class="brand-logo-icon" /> Puulsar量化</div>
           <div class="brand-slogan">智能量化分析平台</div>
           <div class="brand-desc">
             专业的股票数据分析、技术指标追踪与量化策略回测平台，助您把握市场脉搏。

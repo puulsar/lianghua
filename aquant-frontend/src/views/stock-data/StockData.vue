@@ -218,7 +218,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import {
   getStockQuotePage,
   getStockDailyLatest,
@@ -245,6 +246,10 @@ const lastRefreshTime = ref('');
 
 // 搜索关键字
 const searchKeyword = ref('');
+
+// 记录 Jump 跳转携带的股票代码（用于直接定位个股走势）
+const route = useRoute();
+const requestedCode = ref<string>(String(route.query.code || '').trim());
 
 // 列表与分页
 const loading = ref(false);
@@ -353,8 +358,12 @@ const fetchWatchlistStockCodes = async () => {
 const fetchData = async (refresh: boolean = false) => {
   loading.value = true;
   try {
+    // 若本次跳转携带了指定代码，则优先按该代码定位展示
+    const isRequested = !!requestedCode.value;
+    const keyword = requestedCode.value || searchKeyword.value.trim();
+
     const res = await getStockQuotePage({
-      keyword: searchKeyword.value.trim() ? searchKeyword.value.trim() : undefined,
+      keyword: keyword ? keyword : undefined,
       page: pagination.current - 1,
       size: pagination.pageSize,
       sort: ['changePercent,desc'],
@@ -368,7 +377,16 @@ const fetchData = async (refresh: boolean = false) => {
 
       // 如果当前没有选中股票，或选中的股票不在新列表中，默认选中第一项
       if (dataSource.value.length > 0) {
+        if (isRequested) {
+          // 跳转定位：命中即选中，随后清除定位标记，恢复常规列表展示
+          const target = dataSource.value.find(s => s.code === requestedCode.value);
+          if (target) {
+            selectedStock.value = target;
+          }
+          requestedCode.value = '';
+        }
         if (!selectedStock.value || !dataSource.value.some(s => s.code === selectedStock.value?.code)) {
+          requestedCode.value = '';
           selectedStock.value = dataSource.value[0] || null;
         }
       } else {
@@ -475,6 +493,15 @@ onMounted(() => {
   fetchData();
   fetchRefreshTime();
   fetchWatchlistStockCodes();
+});
+
+// 同路由下通过 query.code 再次跳转时，重新定位到对应个股走势
+watch(() => route.query.code, (val) => {
+  if (val) {
+    requestedCode.value = String(val).trim();
+    pagination.current = 1;
+    fetchData();
+  }
 });
 </script>
 

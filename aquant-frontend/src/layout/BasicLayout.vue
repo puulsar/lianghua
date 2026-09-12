@@ -4,7 +4,7 @@
       <div class="header-container">
         <!-- 左侧 Logo 区 -->
         <div class="logo-box">
-          <div class="logo">AQuant 量化</div>
+          <div class="logo">Puulsar量化</div>
         </div>
         
         <!-- 中间 Navigation 区 -->
@@ -103,7 +103,7 @@
     </a-layout-content>
 
     <a-layout-footer class="c-footer">
-      AQuant ©2025 Created by AQuant Team
+      Puulsar量化 ©2025 Created by Puulsar Team
     </a-layout-footer>
 
     <!-- 修改邮箱 Modal -->

@@ -682,7 +682,8 @@ CREATE TABLE `stock_sync` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   `name` varchar(50) NOT NULL COMMENT '名称',
   `value` varchar(64) DEFAULT NULL COMMENT '值',
-  PRIMARY KEY (`id`)
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_stock_sync_name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='股票同步配置';
 
 DROP TABLE IF EXISTS `stock_trade_calendar`;

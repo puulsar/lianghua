@@ -666,7 +666,11 @@ const renderChart = () => {
         show: true,
         fontSize: 11,
         color: '#ffffff',
-        fontWeight: 'bold' as const
+        fontWeight: 'bold' as const,
+        textShadowBlur: 3,
+        textShadowColor: 'rgba(0, 0, 0, 0.5)',
+        textShadowOffsetX: 1,
+        textShadowOffsetY: 1
       },
       raw: node
     };

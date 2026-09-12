@@ -570,6 +570,15 @@
               <template #icon><StarOutlined /></template>
               加入自选
             </a-button>
+            <a-button
+              block
+              @click="viewTrend"
+              :disabled="!selectedStock"
+              class="view-trend-btn"
+            >
+              <template #icon><LineChartOutlined /></template>
+              查看走势
+            </a-button>
           </div>
         </div>
       </div>
@@ -597,6 +606,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
+import { useRouter } from 'vue-router';
 import {
   getValuationMetricsPage,
   getValuationOverview,
@@ -612,11 +622,14 @@ import {
   BarChartOutlined,
   StarFilled,
   StarOutlined,
+  LineChartOutlined,
   ThunderboltOutlined,
   SearchOutlined,
   CloseOutlined,
   ExclamationCircleOutlined
 } from '@ant-design/icons-vue';
+
+const router = useRouter();
 
 // 页面加载与数据
 const loading = ref(false);
@@ -850,6 +863,15 @@ const handleTableChange = (pag: any, _filters: any, sorter: any) => {
 
 const closeDrawer = () => {
   selectedStock.value = null;
+};
+
+// 跳转到个股走势（行情页 K 线）
+const viewTrend = () => {
+  if (!selectedStock.value) return;
+  router.push({
+    path: '/stock-data/index',
+    query: { code: selectedStock.value.stockCode },
+  });
 };
 
 // 筛选切换
@@ -1949,9 +1971,22 @@ onMounted(() => {
   padding: 14px 20px;
   border-top: 1px solid #f1f5f9;
   background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .add-watchlist-btn {
+  height: 38px;
+  font-weight: 500;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.view-trend-btn {
   height: 38px;
   font-weight: 500;
   border-radius: 8px;
