@@ -31,6 +31,12 @@ public class StockIndustryBoardEmQueryService {
 
     @Transactional(readOnly = true)
     public List<IndustryRiseAnalysisVO> analysis(LocalDate startDate, LocalDate endDate, Integer rankLimit) {
+        return analysis(startDate, endDate, rankLimit, false);
+    }
+
+    /** fallRanking=true 时按跌幅从深到浅排名（跌幅最大的排第 1） */
+    public List<IndustryRiseAnalysisVO> analysis(LocalDate startDate, LocalDate endDate, Integer rankLimit,
+                                                 boolean fallRanking) {
         if (startDate == null || endDate == null || startDate.isAfter(endDate)
                 || ChronoUnit.DAYS.between(startDate, endDate) > MAX_NATURAL_DAYS) {
             throw new BusinessException(ExceptionEnum.SYS_CHECK_ERROR, "开始日期和结束日期无效");
@@ -43,8 +49,10 @@ public class StockIndustryBoardEmQueryService {
                 .findByTradeDateBetweenOrderByTradeDateAscSectorNameAsc(startDate.toString(), endDate.toString())) {
             if (item.getChangePercent() != null) byDate.computeIfAbsent(item.getTradeDate(), ignored -> new ArrayList<>()).add(item);
         }
-        Comparator<StockIndustryBoardHistoryEm> comparator = Comparator
-                .comparing(StockIndustryBoardHistoryEm::getChangePercent, Comparator.reverseOrder())
+        Comparator<StockIndustryBoardHistoryEm> comparator = fallRanking
+                ? Comparator.comparing(StockIndustryBoardHistoryEm::getChangePercent)
+                .thenComparing(StockIndustryBoardHistoryEm::getSectorName, Comparator.nullsLast(String::compareTo))
+                : Comparator.comparing(StockIndustryBoardHistoryEm::getChangePercent, Comparator.reverseOrder())
                 .thenComparing(StockIndustryBoardHistoryEm::getSectorName, Comparator.nullsLast(String::compareTo));
         List<IndustryRiseAnalysisVO> result = new ArrayList<>();
         for (List<StockIndustryBoardHistoryEm> rows : byDate.values()) {

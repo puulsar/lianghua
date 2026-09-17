@@ -3,7 +3,7 @@
     <Teleport to="#page-header-extra-left" v-if="isMounted && isFromIndustryAnalysis">
       <a-button type="text" class="analysis-return-button" @click="handleReturnToIndustryAnalysis">
         <template #icon><arrow-left-outlined /></template>
-        返回行业涨幅分析
+        返回行业涨跌幅分析
       </a-button>
     </Teleport>
 

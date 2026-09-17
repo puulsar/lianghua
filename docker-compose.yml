@@ -9,7 +9,9 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_general_ci
       - --default-time-zone=+08:00
-      - --innodb-buffer-pool-size=256M
+      - --innodb-buffer-pool-size=1G
+      - --binlog-expire-logs-seconds=259200
+      - --sync-binlog=0
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-aquant_root_change_me}
       MYSQL_DATABASE: stock

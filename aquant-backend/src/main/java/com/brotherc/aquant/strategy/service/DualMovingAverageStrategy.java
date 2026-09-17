@@ -7,6 +7,7 @@ import com.brotherc.aquant.common.exception.BusinessException;
 import com.brotherc.aquant.common.exception.ExceptionEnum;
 import com.brotherc.aquant.strategy.model.vo.StockTradeSignalVO;
 import com.brotherc.aquant.strategy.model.vo.StockTradeBacktestVO;
+import com.brotherc.aquant.strategy.support.StrategyReliability;
 import com.brotherc.aquant.stock.repository.StockQuoteHistoryRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -248,52 +249,12 @@ public class DualMovingAverageStrategy {
         }
 
         BigDecimal totalReturn = netValue.subtract(BigDecimal.ONE);
-        int tradeCount = tradeReturns.size();
-        BigDecimal winRate = BigDecimal.ZERO;
-        Double tValue = null;
-        Double pValue = null;
-        String reliability = "样本不足";
-
-        if (tradeCount > 0) {
-            winRate = BigDecimal.valueOf(winCount).divide(BigDecimal.valueOf(tradeCount), 4, RoundingMode.HALF_UP);
-        }
-
-        if (tradeCount >= 2) {
-            double[] sampleArray = tradeReturns.stream().mapToDouble(Double::doubleValue).toArray();
-            double sampleMean = tradeReturnSum / tradeCount;
-
-            try {
-                tValue = tTest.t(0.0, sampleArray);
-                double twoSidedPValue = tTest.tTest(0.0, sampleArray);
-
-                if (!Double.isFinite(tValue) || !Double.isFinite(twoSidedPValue)) {
-                    tValue = null;
-                    pValue = null;
-                    reliability = sampleMean > 0 ? "低(方差0)" : "低";
-                } else {
-                    if (tValue > 0) {
-                        pValue = twoSidedPValue / 2.0;
-                    } else {
-                        pValue = 1.0 - (twoSidedPValue / 2.0);
-                    }
-
-                    if (sampleMean > 0 && pValue != null && pValue < 0.05) {
-                        reliability = "高";
-                    } else if (sampleMean > 0 && pValue != null && pValue < 0.10) {
-                        reliability = "中";
-                    } else {
-                        reliability = "低";
-                    }
-                }
-
-            } catch (Exception e) {
-                reliability = sampleMean > 0 ? "低(方差0)" : "低";
-            }
-        }
+        StrategyReliability.Result reliability = StrategyReliability.evaluate(tradeReturns);
 
         return new StockTradeBacktestVO(
-                code, name, totalReturn, tradeCount, winRate, tValue, pValue,
-                reliability, stock.getLatestPrice(), stock.getPir(), stock.getCreatedAt()
+                code, name, totalReturn, reliability.getSampleCount(), reliability.getWinRate(),
+                reliability.getTValue(), reliability.getPValue(), reliability.getReliability(),
+                stock.getLatestPrice(), stock.getPir(), stock.getCreatedAt()
         );
     }
 

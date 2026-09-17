@@ -13,6 +13,7 @@ import com.brotherc.aquant.strategy.model.vo.GridReqVO;
 import com.brotherc.aquant.strategy.model.vo.GridBacktestReqVO;
 import com.brotherc.aquant.strategy.model.vo.StockTradeSignalVO;
 import com.brotherc.aquant.strategy.model.vo.StockTradeBacktestVO;
+import com.brotherc.aquant.strategy.support.StrategyReliability;
 import com.brotherc.aquant.stock.repository.StockQuoteRepository;
 import com.brotherc.aquant.watchlist.repository.StockWatchlistGroupRepository;
 import com.brotherc.aquant.watchlist.repository.StockWatchlistStockRepository;
@@ -32,6 +33,9 @@ import org.springframework.util.CollectionUtils;
 
 import java.math.BigDecimal;
 import java.util.*;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -42,6 +46,20 @@ public class StockStrategyService {
 
     private static final String SIGNAL = "signal";
     private static final String LATEST_PRICE = "latestPrice";
+
+    /**
+     * 全市场回测（非预设参数）代价很高：需要遍历全部股票的历史行情。
+     * 这里做两级保护：
+     * 1) 结果缓存（短期 + LRU），翻页/排序/重复查询不再重复计算；
+     * 2) 并发许可，避免多个全市场回测同时把堆吃满导致 OOM。
+     */
+    private static final long BACKTEST_CACHE_TTL_MS = TimeUnit.MINUTES.toMillis(10);
+    private static final int BACKTEST_CACHE_MAX_ENTRIES = 6;
+    private static final int BACKTEST_MAX_CONCURRENCY = 2;
+    private static final long BACKTEST_PERMIT_WAIT_MS = TimeUnit.SECONDS.toMillis(180);
+
+    private final Semaphore backtestPermits = new Semaphore(BACKTEST_MAX_CONCURRENCY, true);
+    private final Map<String, BacktestCacheEntry> backtestCache = new LinkedHashMap<>(16, 0.75f, true);
 
     private final DualMovingAverageStrategy dualMovingAverageStrategy;
     private final MomentumStrategy momentumStrategy;
@@ -179,7 +197,7 @@ public class StockStrategyService {
         Page<StockTradeBacktestVO> snapshotPage = stockStrategySnapshotService
                 .queryDualMABacktestSnapshot(reqVO, pageable, watchlistCodes);
         if (snapshotPage != null) {
-            return snapshotPage;
+            return postProcessBacktest(snapshotPage.getContent(), pageable, reqVO.getReliability());
         }
 
         return dualMABacktestOnline(reqVO, pageable, watchlistCodes);
@@ -190,17 +208,6 @@ public class StockStrategyService {
             Pageable pageable,
             Set<String> watchlistCodes
     ) {
-        boolean earlyPaginate = StringUtils.isBlank(reqVO.getReliability()) && !hasStrategySortFields(pageable.getSort());
-        if (earlyPaginate) {
-            Page<StockQuote> pagedStocks = stockQuoteRepository.findAll(buildStockQuoteSpec(reqVO.getCode(), watchlistCodes, reqVO.getMarket()), pageable);
-            if (pagedStocks.isEmpty()) {
-                return new PageImpl<>(Collections.emptyList(), pageable, 0);
-            }
-            List<StockTradeBacktestVO> pagedList = dualMovingAverageStrategy.backtest(
-                    reqVO.getMaShort(), reqVO.getMaLong(), reqVO.getRecentYears(), pagedStocks.getContent());
-            return new PageImpl<>(pagedList, pageable, pagedStocks.getTotalElements());
-        }
-
         List<StockQuote> targetStocks = stockQuoteRepository.findAll(
                 buildStockQuoteSpec(reqVO.getCode(), watchlistCodes, reqVO.getMarket())
         );
@@ -208,8 +215,13 @@ public class StockStrategyService {
             return new PageImpl<>(Collections.emptyList(), pageable, 0);
         }
 
-        List<StockTradeBacktestVO> result = dualMovingAverageStrategy.backtest(
-                reqVO.getMaShort(), reqVO.getMaLong(), reqVO.getRecentYears(), targetStocks);
+        List<StockTradeBacktestVO> result = computeFullBacktest(
+                backtestCacheKey("dualma", reqVO.getMarket(), reqVO.getCode(), reqVO.getWatchlistGroupId(),
+                        reqVO.getMaShort(), reqVO.getMaLong(), reqVO.getRecentYears()),
+                () -> dualMovingAverageStrategy.backtest(
+                        reqVO.getMaShort(), reqVO.getMaLong(), reqVO.getRecentYears(), targetStocks));
+
+        StrategyReliability.applyFdr(result);
 
         if (StringUtils.isNotBlank(reqVO.getReliability())) {
             result = result.stream()
@@ -281,6 +293,36 @@ public class StockStrategyService {
         }
 
         return result != null ? result : Comparator.comparing(StockTradeBacktestVO::getCode);
+    }
+
+    /**
+     * 对完整回测集合统一做 FDR 校正、可靠度过滤、排序与分页。
+     *
+     * <p>快照路径与在线路径共用此方法：快照查询已返回全量集合（不做可靠度过滤），
+     * 因此 FDR 能基于完整检验家族计算；在线路径同样传入完整集合。
+     */
+    private Page<StockTradeBacktestVO> postProcessBacktest(
+            List<StockTradeBacktestVO> base, Pageable pageable, String reliability) {
+        StrategyReliability.applyFdr(base);
+        if (StringUtils.isNotBlank(reliability)) {
+            base = base.stream()
+                    .filter(vo -> reliability.equals(vo.getReliability()))
+                    .collect(Collectors.toList());
+        }
+        Sort sort = pageable.getSort();
+        if (sort.isSorted()) {
+            base = new ArrayList<>(base);
+            base.sort(buildBacktestComparator(sort));
+        }
+        int total = base.size();
+        int pageSize = pageable.getPageSize();
+        int currentPage = pageable.getPageNumber();
+        int fromIndex = currentPage * pageSize;
+        if (fromIndex >= total) {
+            return new PageImpl<>(Collections.emptyList(), pageable, total);
+        }
+        int toIndex = Math.min(fromIndex + pageSize, total);
+        return new PageImpl<>(base.subList(fromIndex, toIndex), pageable, total);
     }
 
     // ==================== 动量策略 ====================
@@ -408,18 +450,7 @@ public class StockStrategyService {
         Page<StockTradeBacktestVO> snapshotPage = stockStrategySnapshotService
                 .queryMomentumBacktestSnapshot(reqVO, pageable, watchlistCodes);
         if (snapshotPage != null) {
-            return snapshotPage;
-        }
-
-        boolean earlyPaginate = StringUtils.isBlank(reqVO.getReliability()) && !hasStrategySortFields(pageable.getSort());
-        if (earlyPaginate) {
-            Page<StockQuote> pagedStocks = stockQuoteRepository.findAll(buildStockQuoteSpec(reqVO.getCode(), watchlistCodes, reqVO.getMarket()), pageable);
-            if (pagedStocks.isEmpty()) {
-                return new PageImpl<>(Collections.emptyList(), pageable, 0);
-            }
-            List<StockTradeBacktestVO> pagedList = momentumStrategy.backtest(
-                    reqVO.getLookbackDays(), reqVO.getRecentYears(), pagedStocks.getContent());
-            return new PageImpl<>(pagedList, pageable, pagedStocks.getTotalElements());
+            return postProcessBacktest(snapshotPage.getContent(), pageable, reqVO.getReliability());
         }
 
         List<StockQuote> stocks = stockQuoteRepository.findAll();
@@ -448,8 +479,12 @@ public class StockStrategyService {
             return new PageImpl<>(Collections.emptyList(), pageable, 0);
         }
 
-        List<StockTradeBacktestVO> result = momentumStrategy.backtest(
-                reqVO.getLookbackDays(), reqVO.getRecentYears(), targetStocks);
+        List<StockTradeBacktestVO> result = computeFullBacktest(
+                backtestCacheKey("momentum", reqVO.getMarket(), reqVO.getCode(), reqVO.getWatchlistGroupId(),
+                        reqVO.getLookbackDays(), reqVO.getRecentYears()),
+                () -> momentumStrategy.backtest(reqVO.getLookbackDays(), reqVO.getRecentYears(), targetStocks));
+
+        StrategyReliability.applyFdr(result);
 
         if (StringUtils.isNotBlank(reqVO.getReliability())) {
             result = result.stream()
@@ -529,22 +564,7 @@ public class StockStrategyService {
         Page<StockTradeBacktestVO> snapshotPage = stockStrategySnapshotService
                 .queryMacdBacktestSnapshot(reqVO, pageable, watchlistCodes);
         if (snapshotPage != null) {
-            return snapshotPage;
-        }
-
-        boolean earlyPaginate = StringUtils.isBlank(reqVO.getReliability()) && !hasStrategySortFields(pageable.getSort());
-        if (earlyPaginate) {
-            Page<StockQuote> pagedStocks = stockQuoteRepository.findAll(
-                    buildStockQuoteSpec(reqVO.getCode(), watchlistCodes, reqVO.getMarket()), pageable
-            );
-            if (pagedStocks.isEmpty()) {
-                return new PageImpl<>(Collections.emptyList(), pageable, 0);
-            }
-            List<StockTradeBacktestVO> pagedList = macdStrategy.backtest(
-                    reqVO.getFastPeriod(), reqVO.getSlowPeriod(), reqVO.getSignalPeriod(),
-                    reqVO.getRecentYears(), pagedStocks.getContent()
-            );
-            return new PageImpl<>(pagedList, pageable, pagedStocks.getTotalElements());
+            return postProcessBacktest(snapshotPage.getContent(), pageable, reqVO.getReliability());
         }
 
         List<StockQuote> targetStocks = stockQuoteRepository.findAll(
@@ -553,10 +573,14 @@ public class StockStrategyService {
         if (targetStocks.isEmpty()) {
             return new PageImpl<>(Collections.emptyList(), pageable, 0);
         }
-        List<StockTradeBacktestVO> result = macdStrategy.backtest(
-                reqVO.getFastPeriod(), reqVO.getSlowPeriod(), reqVO.getSignalPeriod(),
-                reqVO.getRecentYears(), targetStocks
-        );
+        List<StockTradeBacktestVO> result = computeFullBacktest(
+                backtestCacheKey("macd", reqVO.getMarket(), reqVO.getCode(), reqVO.getWatchlistGroupId(),
+                        reqVO.getFastPeriod(), reqVO.getSlowPeriod(), reqVO.getSignalPeriod(), reqVO.getRecentYears()),
+                () -> macdStrategy.backtest(
+                        reqVO.getFastPeriod(), reqVO.getSlowPeriod(), reqVO.getSignalPeriod(),
+                        reqVO.getRecentYears(), targetStocks
+                ));
+        StrategyReliability.applyFdr(result);
         if (StringUtils.isNotBlank(reqVO.getReliability())) {
             result = result.stream()
                     .filter(item -> reqVO.getReliability().equals(item.getReliability()))
@@ -621,22 +645,7 @@ public class StockStrategyService {
         Page<StockTradeBacktestVO> snapshotPage = stockStrategySnapshotService
                 .queryGridBacktestSnapshot(reqVO, pageable, watchlistCodes);
         if (snapshotPage != null) {
-            return snapshotPage;
-        }
-
-        boolean earlyPaginate = StringUtils.isBlank(reqVO.getReliability())
-                && !hasStrategySortFields(pageable.getSort());
-        if (earlyPaginate) {
-            Page<StockQuote> pagedStocks = stockQuoteRepository.findAll(
-                    buildStockQuoteSpec(reqVO.getCode(), watchlistCodes, reqVO.getMarket()), pageable
-            );
-            if (pagedStocks.isEmpty()) {
-                return new PageImpl<>(Collections.emptyList(), pageable, 0);
-            }
-            List<StockTradeBacktestVO> pagedList = gridTradingStrategy.backtest(
-                    reqVO.getGridRate(), reqVO.getGridCount(), reqVO.getRecentYears(), pagedStocks.getContent()
-            );
-            return new PageImpl<>(pagedList, pageable, pagedStocks.getTotalElements());
+            return postProcessBacktest(snapshotPage.getContent(), pageable, reqVO.getReliability());
         }
 
         List<StockQuote> targetStocks = stockQuoteRepository.findAll(
@@ -645,9 +654,14 @@ public class StockStrategyService {
         if (targetStocks.isEmpty()) {
             return new PageImpl<>(Collections.emptyList(), pageable, 0);
         }
-        List<StockTradeBacktestVO> result = gridTradingStrategy.backtest(
-                reqVO.getGridRate(), reqVO.getGridCount(), reqVO.getRecentYears(), targetStocks
-        );
+        List<StockTradeBacktestVO> result = computeFullBacktest(
+                backtestCacheKey("grid", reqVO.getMarket(), reqVO.getCode(), reqVO.getWatchlistGroupId(),
+                        reqVO.getGridRate(), reqVO.getGridCount(), reqVO.getRecentYears()),
+                () -> gridTradingStrategy.backtest(
+                        reqVO.getGridRate(), reqVO.getGridCount(), reqVO.getRecentYears(), targetStocks
+                ));
+        // 必须对完整检验集合做多重检验校正，否则上千只股票同时检验会产生大量假阳性
+        StrategyReliability.applyFdr(result);
         if (StringUtils.isNotBlank(reqVO.getReliability())) {
             result = result.stream()
                     .filter(item -> reqVO.getReliability().equals(item.getReliability()))
@@ -658,6 +672,77 @@ public class StockStrategyService {
             result.sort(buildBacktestComparator(pageable.getSort()));
         }
         return toPage(result, pageable);
+    }
+
+    /**
+     * 带缓存与并发限制的全市场回测计算。
+     * 返回的列表只允许读取：上层会先复制再排序，不会修改缓存数据。
+     */
+    private List<StockTradeBacktestVO> computeFullBacktest(
+            String cacheKey,
+            Supplier<List<StockTradeBacktestVO>> supplier
+    ) {
+        long now = System.currentTimeMillis();
+        synchronized (backtestCache) {
+            BacktestCacheEntry cached = backtestCache.get(cacheKey);
+            if (cached != null && cached.expireAt > now) {
+                return cached.data;
+            }
+        }
+
+        boolean acquired = false;
+        try {
+            acquired = backtestPermits.tryAcquire(BACKTEST_PERMIT_WAIT_MS, TimeUnit.MILLISECONDS);
+            if (!acquired) {
+                throw new BusinessException(ExceptionEnum.STOCK_STRATEGY_CALC_BUSY);
+            }
+            synchronized (backtestCache) {
+                BacktestCacheEntry cached = backtestCache.get(cacheKey);
+                if (cached != null && cached.expireAt > System.currentTimeMillis()) {
+                    return cached.data;
+                }
+            }
+
+            List<StockTradeBacktestVO> data = supplier.get();
+
+            synchronized (backtestCache) {
+                backtestCache.put(
+                        cacheKey,
+                        new BacktestCacheEntry(System.currentTimeMillis() + BACKTEST_CACHE_TTL_MS, data)
+                );
+                Iterator<String> iterator = backtestCache.keySet().iterator();
+                while (backtestCache.size() > BACKTEST_CACHE_MAX_ENTRIES && iterator.hasNext()) {
+                    iterator.next();
+                    iterator.remove();
+                }
+            }
+            return data;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(ExceptionEnum.STOCK_STRATEGY_CALC_BUSY);
+        } finally {
+            if (acquired) {
+                backtestPermits.release();
+            }
+        }
+    }
+
+    private String backtestCacheKey(String strategy, Object... parts) {
+        StringBuilder sb = new StringBuilder(strategy);
+        for (Object part : parts) {
+            sb.append('|').append(part == null ? "" : part);
+        }
+        return sb.toString();
+    }
+
+    private static final class BacktestCacheEntry {
+        private final long expireAt;
+        private final List<StockTradeBacktestVO> data;
+
+        private BacktestCacheEntry(long expireAt, List<StockTradeBacktestVO> data) {
+            this.expireAt = expireAt;
+            this.data = data;
+        }
     }
 
     private Comparator<StockTradeSignalVO> buildGridSignalComparator(Sort sort) {

@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.List;
 
 @Repository
@@ -48,5 +49,25 @@ public interface StockIndustryBoardHistoryRepository extends JpaRepository<Stock
             "where s.sectorName in :sectorNames and s.tradeDate <= :endDate group by s.sectorName")
     List<Object[]> findMaxTradeDateBySectorNameInBeforeOrEqual(@Param("sectorNames") List<String> sectorNames,
                                                                @Param("endDate") String endDate);
+
+    /**
+     * 查询 <= endDate 的最近 6 个交易日（降序）。
+     * 用于大盘「近5日成交额」取数，避免依赖成交额为空的指数历史表。
+     */
+    @Query(value = "select distinct trade_date from stock_industry_board_history " +
+            "where trade_date <= :endDate order by trade_date desc limit 6", nativeQuery = true)
+    List<String> findRecentTradeDates(@Param("endDate") String endDate);
+
+    /**
+     * 按交易日汇总全市场成交额（各行业板块成交额之和，单位：元）
+     */
+    @Query(value = "select trade_date, sum(amount) from stock_industry_board_history " +
+            "where trade_date in (:dates) group by trade_date", nativeQuery = true)
+    List<Object[]> sumAmountByTradeDates(@Param("dates") Collection<String> dates);
+
+    /** 统计某个交易日已落库历史 K 线的板块数量（用于收盘后体检：板块历史是否有缺口） */
+    @Query(value = "select count(distinct sector_name) from stock_industry_board_history " +
+            "where trade_date = :tradeDate", nativeQuery = true)
+    long countDistinctSectorByTradeDate(@Param("tradeDate") String tradeDate);
 
 }

@@ -1,410 +1,402 @@
 <template>
-  <div class="stock-terminal-layout">
-    <!-- 顶部全局操作区 (传送至卡片外部顶部) -->
-    <Teleport to="#page-header-extra" v-if="isMounted">
-      <div class="page-header-extra-actions">
-        <span class="refresh-time-text" v-if="lastRefreshTime">
-          更新于 {{ lastRefreshTime }}
-        </span>
-        <a-button
-          type="text"
-          size="small"
-          class="global-refresh-btn"
-          :loading="loading"
-          @click="handleRefresh"
-          title="刷新基金数据"
-        >
-          <template #icon>
-            <sync-outlined />
-          </template>
-        </a-button>
-      </div>
-    </Teleport>
-
-    <!-- 左侧列表栏 -->
-    <div class="stock-terminal-sidebar">
-      <!-- 顶部：类型切换（大类 + 细分），独立一层 -->
-      <div class="fund-type-picker">
-        <div class="sidebar-type-bar">
-          <span class="sidebar-type-bar-title">大类</span>
-          <button
-            type="button"
-            class="sidebar-chip"
-            :class="{ 'sidebar-chip--active': selectedBigCat === undefined }"
-            @click="selectBigCat(undefined)"
-          >全部大类</button>
-          <button
-            v-for="cat in bigCategories"
-            :key="cat"
-            type="button"
-            class="sidebar-chip"
-            :class="{ 'sidebar-chip--active': selectedBigCat === cat }"
-            @click="selectBigCat(cat)"
-          >{{ cat }}</button>
-        </div>
-
-        <div class="sidebar-type-bar" v-if="selectedBigCat && selectedBigSubs.length">
-          <span class="sidebar-type-bar-title">细分</span>
-          <button
-            type="button"
-            class="sidebar-chip"
-            :class="{ 'sidebar-chip--active': queryParams.fundType === undefined }"
-            @click="selectBigCat(selectedBigCat)"
-          >全部</button>
-          <button
-            v-for="s in selectedBigSubs"
-            :key="s.value"
-            type="button"
-            class="sidebar-chip"
-            :class="{ 'sidebar-chip--active': queryParams.fundType === s.value }"
-            @click="selectSmallType(s.value)"
-          >{{ s.short }}</button>
-        </div>
+  <div class="stock-terminal-page">
+    <!-- 顶部通栏：类型切换（大类一行；细分多余一个时才在下面另起一行） -->
+    <div class="fund-type-picker">
+      <div class="sidebar-type-bar" @wheel="onTypeBarWheel">
+        <button
+          v-for="cat in bigCategories"
+          :key="cat"
+          type="button"
+          class="sidebar-chip"
+          :class="{ 'sidebar-chip--active': selectedBigCat === cat }"
+          @click="selectBigCat(cat)"
+        >{{ cat }}</button>
       </div>
 
-      <!-- 顶部搜索框与筛选 -->
-      <div class="sidebar-search-box">
-        <a-input
-          v-model:value="queryParams.keyword"
-          placeholder="搜索基金代码 / 简称 / 拼音"
-          allow-clear
-          class="sidebar-search-input"
-          @pressEnter="onSearch"
-          @change="onSearch"
-        >
-          <template #prefix>
-            <search-outlined style="color: #94a3b8;" />
-          </template>
-        </a-input>
-
-        <!-- 紧凑排序与过滤 -->
-        <div class="sidebar-filter-row">
-          <!-- 排序下拉 -->
-          <a-dropdown trigger="['click']" placement="bottomRight">
-            <a-button
-              size="small"
-              class="sidebar-filter-btn"
-              :class="{ 'sidebar-filter-btn--active': currentSortKey !== 'default' }"
-              title="排序"
-            >
-              <template #icon>
-                <sort-descending-outlined />
-              </template>
-            </a-button>
-            <template #overlay>
-              <a-menu :selectedKeys="[currentSortKey]" @click="handleSortClick">
-                <a-menu-item key="default">
-                  <span>默认排序</span>
-                </a-menu-item>
-                <a-menu-item key="limitDesc">
-                  <span>额度从高到低</span>
-                </a-menu-item>
-                <a-menu-item key="limitAsc">
-                  <span>额度从低到高</span>
-                </a-menu-item>
-              </a-menu>
-            </template>
-          </a-dropdown>
-
-          <!-- 过滤气泡 -->
-          <a-popover trigger="click" placement="bottomRight" overlayClassName="sidebar-filter-popover">
-            <template #content>
-              <div class="filter-popover-content">
-                <div class="filter-popover-item">
-                  <a-checkbox
-                    v-model:checked="queryParams.includeUsStock"
-                    @change="onSearch"
-                  >
-                    海外
-                  </a-checkbox>
-                </div>
-              </div>
-            </template>
-            <a-button
-              size="small"
-              class="sidebar-filter-btn"
-              :class="{ 'sidebar-filter-btn--active': queryParams.includeUsStock }"
-              title="过滤选项"
-            >
-              <template #icon>
-                <filter-outlined />
-              </template>
-            </a-button>
-          </a-popover>
-        </div>
-      </div>
-
-      <!-- 基金列表 -->
-      <div class="sidebar-stock-list" v-if="dataList.length > 0">
-        <div
-          v-for="(fund, index) in dataList"
-          :key="fund.fundCode"
-          class="sidebar-stock-item"
-          :class="{ 'sidebar-stock-item--active': selectedFund?.fundCode === fund.fundCode }"
-          @click="selectFund(fund)"
-        >
-          <!-- 序号 -->
-          <span class="stock-rank" :class="{ 'stock-rank--top': index < 3 }">
-            {{ (pagination.current - 1) * pagination.pageSize + index + 1 }}
-          </span>
-
-          <!-- 基金信息 -->
-          <div class="stock-meta">
-            <div class="stock-name" :title="fund.fundName">{{ fund.fundName }}</div>
-            <div class="fund-sub-row">
-              <span class="stock-code">{{ fund.fundCode }}</span>
-              <span class="fund-type-tag" v-if="fund.fundType">{{ fund.fundType }}</span>
-            </div>
-          </div>
-
-          <!-- 右侧限额状态 -->
-          <div class="fund-status-col">
-            <span
-              class="fund-limit-badge"
-              :class="getLimitStatusClass(fund)"
-            >
-              {{ getLimitStatusText(fund) }}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 空状态或加载状态 -->
-      <div v-else-if="loading" class="sidebar-loading">
-        <a-spin size="small" />
-      </div>
-      <a-empty v-else description="暂无匹配基金" class="sidebar-empty" />
-
-      <!-- 底部简易分页器 -->
-      <div class="sidebar-pagination">
-        <a-pagination
-          v-model:current="pagination.current"
-          :total="pagination.total"
-          :page-size="pagination.pageSize"
-          size="small"
-          simple
-          @change="handlePageChange"
-        />
+      <div
+        class="sidebar-type-bar"
+        v-if="selectedBigSubs.length > 1"
+        @wheel="onTypeBarWheel"
+      >
+        <button
+          v-for="s in selectedBigSubs"
+          :key="s.value"
+          type="button"
+          class="sidebar-chip"
+          :class="{ 'sidebar-chip--active': queryParams.fundType === s.value }"
+          @click="selectSmallType(s.value)"
+        >{{ s.short }}</button>
       </div>
     </div>
 
-    <!-- 右侧主看板区 -->
-    <div class="stock-terminal-main">
-      <!-- 顶部标的概览 Header -->
-      <div class="stock-main-header" v-if="selectedFund">
-        <div class="header-left">
-          <div class="stock-title-row">
-            <span class="main-stock-name">{{ selectedFund.fundName }}</span>
-            <span class="main-stock-code">{{ selectedFund.fundCode }}</span>
-            <a-tag color="blue" class="main-fund-type-tag">{{ selectedFund.fundType }}</a-tag>
-          </div>
-          <div class="fund-quick-metrics">
-            <span class="metric-item">
-              起购: <strong>{{ selectedFund.purchaseStartAmount != null ? formatAmount(selectedFund.purchaseStartAmount) : '¥1.00' }}</strong>
-            </span>
-            <span class="metric-item">
-              日限额: <strong>{{ selectedFund.dailyLimitAmount != null ? formatAmount(selectedFund.dailyLimitAmount) : '不限' }}</strong>
-            </span>
-            <span class="metric-item">
-              费率: <strong>{{ selectedFund.feeRate != null ? selectedFund.feeRate + '%' : '0.00%' }}</strong>
-            </span>
-            <span class="metric-item" v-if="selectedFund.latestNetValueReportDate">
-              净值日: <strong>{{ selectedFund.latestNetValueReportDate }}</strong>
-            </span>
-          </div>
-        </div>
-
-        <div class="header-right">
-          <!-- 官方渠道状态胶囊 -->
-          <div class="official-limit-capsule" v-if="selectedFund.officialPurchaseStatus">
-            <span class="capsule-label">{{ selectedFund.officialPurchaseSourceName || '官方直销' }}:</span>
-            <span
-              class="capsule-status"
-              :class="getLimitStatusClass(selectedFund)"
-            >
-              {{ formatOfficialLimit(selectedFund.officialPurchaseStatus, selectedFund.officialPurchaseLimitAmount, 'CNY', 'PURCHASE') }}
-            </span>
-          </div>
-
-          <!-- 加入自选按钮 -->
+    <div class="stock-terminal-layout">
+      <!-- 顶部全局操作区 (传送至卡片外部顶部) -->
+      <Teleport to="#page-header-extra" v-if="isMounted">
+        <div class="page-header-extra-actions">
+          <span class="refresh-time-text" v-if="lastRefreshTime">
+            更新于 {{ lastRefreshTime }}
+          </span>
           <a-button
+            type="text"
             size="small"
-            class="watchlist-action-btn"
-            :class="{ 'in-watchlist': isInWatchlist }"
-            @click="showAddWatchlist"
-            :loading="addLoading"
+            class="global-refresh-btn"
+            :loading="loading"
+            @click="handleRefresh"
+            title="刷新基金数据"
           >
             <template #icon>
-              <check-outlined v-if="isInWatchlist" />
-              <plus-outlined v-else />
+              <sync-outlined />
             </template>
-            {{ isInWatchlist ? '已自选' : '加自选' }}
           </a-button>
         </div>
-      </div>
+      </Teleport>
 
-      <!-- 下部区域：左侧图表+持仓/额度Tab + 右侧基金档案看板 -->
-      <div class="stock-main-body" v-if="selectedFund">
-        <!-- 左侧核心主内容区 -->
-        <div class="fund-main-content">
-          <!-- 上方：净值走势图 -->
-          <div class="fund-chart-card">
-            <FundNetValueChart :fundCode="selectedFund.fundCode" :showMA="true" />
-          </div>
+      <!-- 左侧列表栏 -->
+      <div class="stock-terminal-sidebar">
+        <!-- 顶部搜索框与筛选 -->
+        <div class="sidebar-search-box">
+          <a-input
+            v-model:value="queryParams.keyword"
+            placeholder="搜索基金代码 / 简称 / 拼音"
+            allow-clear
+            class="sidebar-search-input"
+            @pressEnter="onSearch"
+            @change="onSearch"
+          >
+            <template #prefix>
+              <search-outlined style="color: #94a3b8;" />
+            </template>
+          </a-input>
 
-          <!-- 下方：Tab 切换（官方额度明细 vs 重仓持仓明细） -->
-          <div class="fund-detail-tabs-section">
-            <a-tabs v-model:activeKey="activeTabKey" size="small" class="fund-custom-tabs">
-              <a-tab-pane key="limits" tab="官方渠道额度明细">
-                <div class="tab-table-container">
-                  <a-table
-                    :columns="purchaseLimitColumns"
-                    :data-source="purchaseLimitList"
-                    :loading="purchaseLimitLoading"
-                    :pagination="false"
-                    :row-key="purchaseLimitRowKey"
-                    size="small"
-                    class="tab-inner-table"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.key === 'sourceName'">
-                        {{ record.sourceName || '-' }}
-                      </template>
-                      <template v-else-if="column.key === 'salesChannel'">
-                        {{ record.salesChannelName || '-' }}
-                      </template>
-                      <template v-else-if="column.key === 'businessType'">
-                        {{ formatBusinessType(record.businessType) }}
-                      </template>
-                      <template v-else-if="column.key === 'limit'">
-                        <span :class="record.status === 'LIMITED' ? 'limit-text-warn' : record.status === 'SUSPENDED' ? 'limit-text-danger' : 'limit-text-success'">
-                          {{ formatOfficialLimit(record.status, record.limitAmount, record.currency, record.businessType) }}
-                        </span>
-                      </template>
-                      <template v-else-if="column.key === 'announcement'">
-                        <a
-                          v-if="record.announcementUrl"
-                          :href="record.announcementUrl"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          :title="record.announcementTitle"
-                        >
-                          查看公告
-                        </a>
-                        <span v-else>-</span>
-                      </template>
-                    </template>
-                  </a-table>
+          <!-- 紧凑排序与过滤 -->
+          <div class="sidebar-filter-row">
+            <!-- 排序下拉 -->
+            <a-dropdown trigger="['click']" placement="bottomRight">
+              <a-button
+                size="small"
+                class="sidebar-filter-btn"
+                :class="{ 'sidebar-filter-btn--active': currentSortKey !== 'default' }"
+                title="排序"
+              >
+                <template #icon>
+                  <sort-descending-outlined />
+                </template>
+              </a-button>
+              <template #overlay>
+                <a-menu :selectedKeys="[currentSortKey]" @click="handleSortClick">
+                  <a-menu-item key="default">
+                    <span>默认排序</span>
+                  </a-menu-item>
+                  <a-menu-item key="limitDesc">
+                    <span>额度从高到低</span>
+                  </a-menu-item>
+                  <a-menu-item key="limitAsc">
+                    <span>额度从低到高</span>
+                  </a-menu-item>
+                </a-menu>
+              </template>
+            </a-dropdown>
+
+            <!-- 过滤气泡 -->
+            <a-popover trigger="click" placement="bottomRight" overlayClassName="sidebar-filter-popover">
+              <template #content>
+                <div class="filter-popover-content">
+                  <div class="filter-popover-item">
+                    <a-checkbox
+                      v-model:checked="queryParams.includeUsStock"
+                      @change="onSearch"
+                    >
+                      海外
+                    </a-checkbox>
+                  </div>
                 </div>
-              </a-tab-pane>
-
-              <a-tab-pane key="holdings" tab="最新重仓持仓明细">
-                <div class="tab-table-container">
-                  <a-table
-                    :columns="holdingColumns"
-                    :data-source="holdingList"
-                    :loading="holdingLoading"
-                    :pagination="false"
-                    row-key="id"
-                    size="small"
-                    class="tab-inner-table"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.dataIndex === 'netValueRatio'">
-                        <span style="font-weight: 600; color: #0f172a;">{{ record.netValueRatio }}%</span>
-                      </template>
-                      <template v-else-if="column.dataIndex === 'marketValue'">
-                        {{ record.marketValue != null ? record.marketValue + ' 万元' : '-' }}
-                      </template>
-                    </template>
-                  </a-table>
-                </div>
-              </a-tab-pane>
-            </a-tabs>
+              </template>
+              <a-button
+                size="small"
+                class="sidebar-filter-btn"
+                :class="{ 'sidebar-filter-btn--active': queryParams.includeUsStock }"
+                title="过滤选项"
+              >
+                <template #icon>
+                  <filter-outlined />
+                </template>
+              </a-button>
+            </a-popover>
           </div>
         </div>
 
-        <!-- 右侧基金档案看板 -->
-        <div class="market-quotes-panel">
-          <div class="quotes-panel-title">基金档案</div>
-          <div class="quotes-list">
-            <div class="quotes-item">
-              <span class="quote-label">基金代码</span>
-              <span class="quote-value">{{ selectedFund.fundCode }}</span>
+        <!-- 基金列表 -->
+        <div class="sidebar-stock-list" v-if="dataList.length > 0">
+          <div
+            v-for="(fund, index) in dataList"
+            :key="fund.fundCode"
+            class="sidebar-stock-item"
+            :class="{ 'sidebar-stock-item--active': selectedFund?.fundCode === fund.fundCode }"
+            @click="selectFund(fund)"
+          >
+            <!-- 序号 -->
+            <span class="stock-rank" :class="{ 'stock-rank--top': index < 3 }">
+              {{ (pagination.current - 1) * pagination.pageSize + index + 1 }}
+            </span>
+
+            <!-- 基金信息 -->
+            <div class="stock-meta">
+              <div class="stock-name" :title="fund.fundName">{{ fund.fundName }}</div>
+              <div class="fund-sub-row">
+                <span class="stock-code">{{ fund.fundCode }}</span>
+                <span class="fund-type-tag" v-if="fund.fundType">{{ fund.fundType }}</span>
+              </div>
             </div>
-            <div class="quotes-item">
-              <span class="quote-label">基金类型</span>
-              <span class="quote-value">{{ selectedFund.fundType }}</span>
-            </div>
-            <div class="quotes-item">
-              <span class="quote-label">购买起点</span>
-              <span class="quote-value">{{ selectedFund.purchaseStartAmount != null ? formatAmount(selectedFund.purchaseStartAmount) : '-' }}</span>
-            </div>
-            <div class="quotes-item">
-              <span class="quote-label">每日限额</span>
-              <span class="quote-value">{{ selectedFund.dailyLimitAmount != null ? formatAmount(selectedFund.dailyLimitAmount) : '不限' }}</span>
-            </div>
-            <div class="quotes-item">
-              <span class="quote-label">申购费率</span>
-              <span class="quote-value">{{ selectedFund.feeRate != null ? selectedFund.feeRate + '%' : '-' }}</span>
-            </div>
-            <div class="quotes-item" v-if="selectedFund.latestNetValueReportDate">
-              <span class="quote-label">净值日期</span>
-              <span class="quote-value quote-time">{{ selectedFund.latestNetValueReportDate }}</span>
-            </div>
-            <div class="quotes-item" v-if="selectedFund.officialPurchaseSourceName">
-              <span class="quote-label">官方渠道</span>
-              <span class="quote-value">{{ selectedFund.officialPurchaseSourceName }}</span>
-            </div>
-            <div class="quotes-item" v-if="selectedFund.officialPurchaseStatus">
-              <span class="quote-label">官方状态</span>
-              <span class="quote-value" :class="getLimitStatusClass(selectedFund)">
-                {{ selectedFund.officialPurchaseStatus === 'LIMITED' ? '限额申购' : selectedFund.officialPurchaseStatus === 'SUSPENDED' ? '暂停申购' : '开放申购' }}
+
+            <!-- 右侧限额状态 -->
+            <div class="fund-status-col">
+              <span
+                class="fund-limit-badge"
+                :class="getLimitStatusClass(fund)"
+              >
+                {{ getLimitStatusText(fund) }}
               </span>
             </div>
-            <div class="quotes-item" v-if="selectedFund.officialPurchaseLimitAmount != null">
-              <span class="quote-label">官方限额</span>
-              <span class="quote-value">{{ formatAmount(selectedFund.officialPurchaseLimitAmount) }}</span>
-            </div>
-            <div class="quotes-item" v-if="selectedFund.officialPurchaseEffectiveDate">
-              <span class="quote-label">生效日期</span>
-              <span class="quote-value quote-time">{{ selectedFund.officialPurchaseEffectiveDate }}</span>
-            </div>
           </div>
+        </div>
+
+        <!-- 空状态或加载状态 -->
+        <div v-else-if="loading" class="sidebar-loading">
+          <a-spin size="small" />
+        </div>
+        <a-empty v-else description="暂无匹配基金" class="sidebar-empty" />
+
+        <!-- 底部简易分页器 -->
+        <div class="sidebar-pagination">
+          <a-pagination
+            v-model:current="pagination.current"
+            :total="pagination.total"
+            :page-size="pagination.pageSize"
+            size="small"
+            simple
+            @change="handlePageChange"
+          />
         </div>
       </div>
 
-      <!-- 无选中基金时空状态 -->
-      <a-empty v-else description="请从左侧选择基金查看详情" class="main-terminal-empty" />
-    </div>
+      <!-- 右侧主看板区 -->
+      <div class="stock-terminal-main">
+        <!-- 顶部标的概览 Header -->
+        <div class="stock-main-header" v-if="selectedFund">
+          <div class="header-left">
+            <div class="stock-title-row">
+              <span class="main-stock-name">{{ selectedFund.fundName }}</span>
+              <span class="main-stock-code">{{ selectedFund.fundCode }}</span>
+              <a-tag color="blue" class="main-fund-type-tag">{{ selectedFund.fundType }}</a-tag>
+            </div>
+            <div class="fund-quick-metrics">
+              <span class="metric-item">
+                起购: <strong>{{ selectedFund.purchaseStartAmount != null ? formatAmount(selectedFund.purchaseStartAmount) : '¥1.00' }}</strong>
+              </span>
+              <span class="metric-item">
+                日限额: <strong>{{ selectedFund.dailyLimitAmount != null ? formatAmount(selectedFund.dailyLimitAmount) : '不限' }}</strong>
+              </span>
+              <span class="metric-item">
+                费率: <strong>{{ selectedFund.feeRate != null ? selectedFund.feeRate + '%' : '0.00%' }}</strong>
+              </span>
+              <span class="metric-item" v-if="selectedFund.latestNetValueReportDate">
+                净值日: <strong>{{ selectedFund.latestNetValueReportDate }}</strong>
+              </span>
+            </div>
+          </div>
 
-    <!-- 加入自选模态框 -->
-    <a-modal
-      v-model:visible="watchlistVisible"
-      title="加入自选分组"
-      @ok="handleConfirmAdd"
-      :confirmLoading="addLoading"
-      :destroyOnClose="true"
-      width="420px"
-    >
-      <div style="margin-bottom: 14px; font-size: 14px; color: #1e293b;">
-        将 {{ selectedFund?.fundName }} ({{ selectedFund?.fundCode }}) 加入分组：
+          <div class="header-right">
+            <!-- 官方渠道状态胶囊 -->
+            <div class="official-limit-capsule" v-if="selectedFund.officialPurchaseStatus">
+              <span class="capsule-label">{{ selectedFund.officialPurchaseSourceName || '官方直销' }}:</span>
+              <span
+                class="capsule-status"
+                :class="getLimitStatusClass(selectedFund)"
+              >
+                {{ formatOfficialLimit(selectedFund.officialPurchaseStatus, selectedFund.officialPurchaseLimitAmount, 'CNY', 'PURCHASE') }}
+              </span>
+            </div>
+
+            <!-- 加入自选按钮 -->
+            <a-button
+              size="small"
+              class="watchlist-action-btn"
+              :class="{ 'in-watchlist': isInWatchlist }"
+              @click="showAddWatchlist"
+              :loading="addLoading"
+            >
+              <template #icon>
+                <check-outlined v-if="isInWatchlist" />
+                <plus-outlined v-else />
+              </template>
+              {{ isInWatchlist ? '已自选' : '加自选' }}
+            </a-button>
+          </div>
+        </div>
+
+        <!-- 下部区域：左侧图表+持仓/额度Tab + 右侧基金档案看板 -->
+        <div class="stock-main-body" v-if="selectedFund">
+          <!-- 左侧核心主内容区 -->
+          <div class="fund-main-content">
+            <!-- 上方：净值走势图 -->
+            <div class="fund-chart-card">
+              <FundNetValueChart :fundCode="selectedFund.fundCode" :showMA="true" />
+            </div>
+
+            <!-- 下方：Tab 切换（官方额度明细 vs 重仓持仓明细） -->
+            <div class="fund-detail-tabs-section">
+              <a-tabs v-model:activeKey="activeTabKey" size="small" class="fund-custom-tabs">
+                <a-tab-pane key="limits" tab="官方渠道额度明细">
+                  <div class="tab-table-container">
+                    <a-table
+                      :columns="purchaseLimitColumns"
+                      :data-source="purchaseLimitList"
+                      :loading="purchaseLimitLoading"
+                      :pagination="false"
+                      :row-key="purchaseLimitRowKey"
+                      size="small"
+                      class="tab-inner-table"
+                    >
+                      <template #bodyCell="{ column, record }">
+                        <template v-if="column.key === 'sourceName'">
+                          {{ record.sourceName || '-' }}
+                        </template>
+                        <template v-else-if="column.key === 'salesChannel'">
+                          {{ record.salesChannelName || '-' }}
+                        </template>
+                        <template v-else-if="column.key === 'businessType'">
+                          {{ formatBusinessType(record.businessType) }}
+                        </template>
+                        <template v-else-if="column.key === 'limit'">
+                          <span :class="record.status === 'LIMITED' ? 'limit-text-warn' : record.status === 'SUSPENDED' ? 'limit-text-danger' : 'limit-text-success'">
+                            {{ formatOfficialLimit(record.status, record.limitAmount, record.currency, record.businessType) }}
+                          </span>
+                        </template>
+                        <template v-else-if="column.key === 'announcement'">
+                          <a
+                            v-if="record.announcementUrl"
+                            :href="record.announcementUrl"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            :title="record.announcementTitle"
+                          >
+                            查看公告
+                          </a>
+                          <span v-else>-</span>
+                        </template>
+                      </template>
+                    </a-table>
+                  </div>
+                </a-tab-pane>
+
+                <a-tab-pane key="holdings" tab="最新重仓持仓明细">
+                  <div class="tab-table-container">
+                    <a-table
+                      :columns="holdingColumns"
+                      :data-source="holdingList"
+                      :loading="holdingLoading"
+                      :pagination="false"
+                      row-key="id"
+                      size="small"
+                      class="tab-inner-table"
+                    >
+                      <template #bodyCell="{ column, record }">
+                        <template v-if="column.dataIndex === 'netValueRatio'">
+                          <span style="font-weight: 600; color: #0f172a;">{{ record.netValueRatio }}%</span>
+                        </template>
+                        <template v-else-if="column.dataIndex === 'marketValue'">
+                          {{ record.marketValue != null ? record.marketValue + ' 万元' : '-' }}
+                        </template>
+                      </template>
+                    </a-table>
+                  </div>
+                </a-tab-pane>
+              </a-tabs>
+            </div>
+          </div>
+
+          <!-- 右侧基金档案看板 -->
+          <div class="market-quotes-panel">
+            <div class="quotes-panel-title">基金档案</div>
+            <div class="quotes-list">
+              <div class="quotes-item">
+                <span class="quote-label">基金代码</span>
+                <span class="quote-value">{{ selectedFund.fundCode }}</span>
+              </div>
+              <div class="quotes-item">
+                <span class="quote-label">基金类型</span>
+                <span class="quote-value">{{ selectedFund.fundType }}</span>
+              </div>
+              <div class="quotes-item">
+                <span class="quote-label">购买起点</span>
+                <span class="quote-value">{{ selectedFund.purchaseStartAmount != null ? formatAmount(selectedFund.purchaseStartAmount) : '-' }}</span>
+              </div>
+              <div class="quotes-item">
+                <span class="quote-label">每日限额</span>
+                <span class="quote-value">{{ selectedFund.dailyLimitAmount != null ? formatAmount(selectedFund.dailyLimitAmount) : '不限' }}</span>
+              </div>
+              <div class="quotes-item">
+                <span class="quote-label">申购费率</span>
+                <span class="quote-value">{{ selectedFund.feeRate != null ? selectedFund.feeRate + '%' : '-' }}</span>
+              </div>
+              <div class="quotes-item" v-if="selectedFund.latestNetValueReportDate">
+                <span class="quote-label">净值日期</span>
+                <span class="quote-value quote-time">{{ selectedFund.latestNetValueReportDate }}</span>
+              </div>
+              <div class="quotes-item" v-if="selectedFund.officialPurchaseSourceName">
+                <span class="quote-label">官方渠道</span>
+                <span class="quote-value">{{ selectedFund.officialPurchaseSourceName }}</span>
+              </div>
+              <div class="quotes-item" v-if="selectedFund.officialPurchaseStatus">
+                <span class="quote-label">官方状态</span>
+                <span class="quote-value" :class="getLimitStatusClass(selectedFund)">
+                  {{ selectedFund.officialPurchaseStatus === 'LIMITED' ? '限额申购' : selectedFund.officialPurchaseStatus === 'SUSPENDED' ? '暂停申购' : '开放申购' }}
+                </span>
+              </div>
+              <div class="quotes-item" v-if="selectedFund.officialPurchaseLimitAmount != null">
+                <span class="quote-label">官方限额</span>
+                <span class="quote-value">{{ formatAmount(selectedFund.officialPurchaseLimitAmount) }}</span>
+              </div>
+              <div class="quotes-item" v-if="selectedFund.officialPurchaseEffectiveDate">
+                <span class="quote-label">生效日期</span>
+                <span class="quote-value quote-time">{{ selectedFund.officialPurchaseEffectiveDate }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 无选中基金时空状态 -->
+        <a-empty v-else description="请从左侧选择基金查看详情" class="main-terminal-empty" />
       </div>
-      <a-select
-        v-model:value="targetGroupId"
-        placeholder="选择自选分组"
-        style="width: 100%"
-        :loading="watchlistGroupsLoading"
+
+      <!-- 加入自选模态框 -->
+      <a-modal
+        v-model:visible="watchlistVisible"
+        title="加入自选分组"
+        @ok="handleConfirmAdd"
+        :confirmLoading="addLoading"
+        :destroyOnClose="true"
+        width="420px"
       >
-        <a-select-option
-          v-for="group in watchlistGroups"
-          :key="group.id"
-          :value="group.id"
+        <div style="margin-bottom: 14px; font-size: 14px; color: #1e293b;">
+          将 {{ selectedFund?.fundName }} ({{ selectedFund?.fundCode }}) 加入分组：
+        </div>
+        <a-select
+          v-model:value="targetGroupId"
+          placeholder="选择自选分组"
+          style="width: 100%"
+          :loading="watchlistGroupsLoading"
         >
-          {{ group.name }}
-        </a-select-option>
-      </a-select>
-    </a-modal>
+          <a-select-option
+            v-for="group in watchlistGroups"
+            :key="group.id"
+            :value="group.id"
+          >
+            {{ group.name }}
+          </a-select-option>
+        </a-select>
+      </a-modal>
+    </div>
   </div>
 </template>
 
@@ -488,6 +480,16 @@ const handleSortClick = ({ key }: { key: any }) => {
     queryParams.sort = undefined;
   }
   onSearch();
+};
+
+// 类型筛选栏：内容横向排成一排，超出宽度时用滚轮 / 触控板左右滑动
+const onTypeBarWheel = (e: WheelEvent) => {
+  const el = e.currentTarget as HTMLElement;
+  if (!el || el.scrollWidth <= el.clientWidth) return;
+  const delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+  if (!delta) return;
+  e.preventDefault();
+  el.scrollLeft += delta;
 };
 
 // 动态基金类型选项（由后端直接提供）
@@ -655,18 +657,22 @@ const selectedBigSubs = computed(() => {
 });
 
 // 点击大类：按前缀过滤该大类，并展示其细分
+// （已选中的再点一次 = 取消筛选，等价于原来的「全部大类」）
 const selectBigCat = (cat?: string) => {
-  selectedBigCat.value = cat || undefined;
+  const next = selectedBigCat.value === cat ? undefined : cat;
+  selectedBigCat.value = next || undefined;
   pagination.current = 1;
   queryParams.fundType = undefined;
-  queryParams.fundTypePrefix = cat || undefined;
+  queryParams.fundTypePrefix = next || undefined;
   loadData();
 };
 
 // 点击细分：精确过滤该小类
+// （已选中的再点一次 = 取消细分，回到该大类全部）
 const selectSmallType = (value: string) => {
-  queryParams.fundType = value;
-  queryParams.fundTypePrefix = undefined;
+  const isSame = queryParams.fundType === value;
+  queryParams.fundType = isSame ? undefined : value;
+  queryParams.fundTypePrefix = isSame ? selectedBigCat.value : undefined;
   pagination.current = 1;
   loadData();
 };
@@ -823,12 +829,24 @@ onMounted(() => {
 /* ========================================
    Trading Terminal Layout (基金双栏看板布局)
    ======================================== */
+/* 页面级纵向容器：顶部通栏筛选 + 下方双栏 */
+.stock-terminal-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  height: calc(100vh - 100px);
+  min-height: 640px;
+  box-sizing: border-box;
+}
+
+/* 下方双栏（侧边栏 + 主内容），吃满剩余高度 */
 .stock-terminal-layout {
   display: flex;
   gap: 16px;
   width: 100%;
-  height: calc(100vh - 100px);
-  min-height: 640px;
+  flex: 1 1 auto;
+  min-height: 0;
   box-sizing: border-box;
 }
 
@@ -898,55 +916,63 @@ onMounted(() => {
   border-color: #3b82f6;
 }
 
-/* 类型切换（独立一层，换行铺开，按钮加大） */
+/* 类型切换：页面顶部独立通栏（与「基本面指标」快捷胶囊同一套视觉）
+   灰色凹槽 + 无边框文字项 + 选中项深色实心胶囊
+   大类一行；细分多于一个时在下面另起一行 */
 .fund-type-picker {
-  background: #ffffff;
-  border: 1px solid #edf2f7;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+  background: #f1f5f9;
   border-radius: 10px;
-  padding: 8px;
-  margin-bottom: 10px;
+  padding: 4px;
+  overflow: hidden;
 }
 
 .sidebar-type-bar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;          /* 组内胶囊横向排成一排 */
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  overflow-x: auto;           /* 窗口很窄时该行横向滑动，不换行 */
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-.sidebar-type-bar + .sidebar-type-bar {
-  margin-top: 6px;
-}
-
-.sidebar-type-bar-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #94a3b8;
-  user-select: none;
+.sidebar-type-bar::-webkit-scrollbar {
+  display: none;
 }
 
 .sidebar-chip {
-  border: 1px solid #e2e8f0;
-  background: #f8fafc;
-  color: #475569;
+  flex: 0 0 auto;             /* 胶囊不压缩、不换行 */
+  white-space: nowrap;
+  border: none;
+  background: transparent;
+  color: #64748b;
   border-radius: 8px;
-  padding: 6px 14px;
-  font-size: 14px;
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.2s ease;
   line-height: 1.4;
 }
 
 .sidebar-chip:hover {
-  border-color: #94a3b8;
   color: #0f172a;
 }
 
-.sidebar-chip--active {
+/* 注意：选中态必须带 :hover 变体，且写在 .sidebar-chip:hover 之后。
+   否则悬停时 `.sidebar-chip:hover`（0,2,0）优先级高于 `.sidebar-chip--active`（0,1,0），
+   文字会被改成 #0f172a 落在同样的深色底上 —— 整颗胶囊变成纯黑一块、字看不见。 */
+.sidebar-chip--active,
+.sidebar-chip--active:hover {
   background: #0f172a;
-  border-color: #0f172a;
   color: #ffffff;
-  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .sidebar-filter-row {

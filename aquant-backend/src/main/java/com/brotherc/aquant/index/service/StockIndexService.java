@@ -9,6 +9,7 @@ import com.brotherc.aquant.index.model.vo.StockIndexCardVO;
 import com.brotherc.aquant.index.repository.StockIndexHistoryRepository;
 import com.brotherc.aquant.index.repository.StockIndexSpotRepository;
 import com.brotherc.aquant.common.utils.DateUtils;
+import com.brotherc.aquant.common.utils.StockHelper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -40,6 +41,7 @@ public class StockIndexService {
 
     private final StockIndexSpotRepository stockIndexSpotRepository;
     private final StockIndexHistoryRepository stockIndexHistoryRepository;
+    private final StockHelper stockHelper;
 
     /**
      * 保存/更新指数实时行情快照 (仅针对 stock_index_spot 表)
@@ -92,6 +94,12 @@ public class StockIndexService {
         }
 
         LocalDate today = now.toLocalDate();
+        // 仅当当天为交易日且已收盘时才把实时行情落为当日历史 K 线；
+        // 否则周末/节假日会把上一交易日的 stale 快照写成幽灵 K 线。
+        if (!stockHelper.isTradeDay(today) || !stockHelper.isClosedDailyQuoteAvailable(now)) {
+            log.debug("当天 {} 非交易日或尚未收盘，跳过指数历史日K补充写入", today);
+            return;
+        }
         for (StockZhIndexSpotSina item : spotList) {
             if (StringUtils.isNotBlank(item.getCode()) && item.getLatestPrice() != null && targetCodes.contains(item.getCode())) {
                 StockIndexHistory history = stockIndexHistoryRepository

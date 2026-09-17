@@ -45,6 +45,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -109,6 +110,16 @@ public class StockSyncTask {
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     /**
+     * 盘中增量同步锁：与全量同步互斥，也防止调度与手动触发相互重叠
+     */
+    private final AtomicBoolean intradayRunning = new AtomicBoolean(false);
+
+    /**
+     * 15:01 收盘定点强制刷新锁：防止与手动触发 / 启动全量同步相互重叠
+     */
+    private final AtomicBoolean closeRefreshRunning = new AtomicBoolean(false);
+
+    /**
      * 项目完全启动后，异步执行一次
      */
     @Async
@@ -119,6 +130,16 @@ public class StockSyncTask {
             return;
         }
         runFullSync();
+    }
+
+    /**
+     * 全量同步是否正在执行。
+     * <p>
+     * 供收盘收口作业（{@code StockDailyCloseTask}）判断：两者都要刷新策略快照，
+     * 并行跑会让快照事务互相把对方标记成 rollback-only，导致某个策略快照刷新失败。
+     */
+    public boolean isFullSyncRunning() {
+        return running.get();
     }
 
     /**
@@ -146,6 +167,236 @@ public class StockSyncTask {
         } finally {
             running.set(false);
         }
+    }
+
+    /**
+     * 盘中定时增量同步：交易时段每 5 分钟刷新一次【实时行情 / 指数 / 板块】。
+     * <p>
+     * 背景：全量同步 runFullSync() 只在应用启动或手动触发时执行，盘中仪表盘会一直停留在
+     * 最后一次同步的快照——前端再怎么刷新也读不到新数据。而 syncStackQuote / syncStockIndex /
+     * syncStockBoard 内部本来就按「盘中每次执行都刷新」实现（见 shouldRefreshLatestQuote），
+     * 这里只是补上周期调用。
+     * <p>
+     * 用 fixedDelay 而非 fixedRate：等上一次跑完再计下一次，配合 intradayRunning 防重叠。
+     * 可通过 sys_config 的 sync.autoScheduled=0 关闭（同时也会关闭启动全量同步）。
+     */
+    @Scheduled(initialDelay = 60_000L, fixedDelay = 300_000L)
+    public void intradaySync() {
+        if (!sysConfigService.getBoolean(SysConfigService.AUTO_SYNC)) {
+            return;
+        }
+        // 不因全量同步而跳过：全量同步还包含基金/分红/报表等夜间作业，可能持续一两个小时，
+        // 若在这里让位，盘中刷新会被长时间挡住。两者写的都是幂等快照，重叠执行只记日志。
+        if (running.get()) {
+            log.info("全量同步进行中，本次盘中增量同步与之重叠执行");
+        }
+        if (!intradayRunning.compareAndSet(false, true)) {
+            log.info("盘中增量同步仍在执行中，本次跳过");
+            return;
+        }
+        try {
+            LocalDateTime now = LocalDateTime.now();
+            if (!isInTradingSession(now)) {
+                return;
+            }
+            log.info("盘中增量同步开始, syncTime={}", now);
+            // 只刷新实时快照，跳过历史日线回补（回补留给启动全量同步）
+            syncWithRetry("实时行情", () -> syncStackQuote(now, true));
+            syncWithRetry("指数", () -> syncStockIndex(now));
+            syncWithRetry("板块", () -> syncStockBoard(now, true));
+            log.info("盘中增量同步完成, syncTime={}", now);
+        } catch (Exception e) {
+            log.error("盘中增量同步失败", e);
+        } finally {
+            intradayRunning.set(false);
+        }
+    }
+
+    /**
+     * 每个交易日 15:01 的收盘定点强制刷新。
+     * <p>
+     * 收盘后 1 分钟固定触发一次，抓全市场（行情 / 指数 / 板块）的最后一笔收盘快照，
+     * 并<b>自动校验刷新结果</b>——只有确认数据真正落库（同步水位推进、行情条数未退化）才视为成功，
+     * 否则自动重试；多次重试仍失败则打 ERROR 日志告警。确保当天收盘数据不丢、仪表盘第二天能看到。
+     * <p>
+     * 用 cron 而非 fixedDelay：固定在收盘后 1 分钟触发，不随应用启动时间漂移。
+     * 非交易日由 stockHelper.isTradeDay 兜底跳过；zone 显式指定 Asia/Shanghai，避免 NAS 时区歧义。
+     */
+    @Async
+    @Scheduled(cron = "0 1 15 * * MON-FRI", zone = "Asia/Shanghai")
+    public void scheduledCloseSnapshotRefresh() {
+        if (!sysConfigService.getBoolean(SysConfigService.AUTO_SYNC)) {
+            log.info("自动同步已关闭，跳过 15:01 收盘强制刷新");
+            return;
+        }
+        if (!stockHelper.isTradeDay(LocalDate.now())) {
+            log.info("今天非交易日，跳过 15:01 收盘强制刷新");
+            return;
+        }
+        doCloseRefresh();
+    }
+
+    /**
+     * 手动触发收盘强制刷新（后台接口 /admin/sync/close-refresh 调用）。
+     * 与定时任务共用同一套“强制刷新 + 结果校验 + 失败重试”逻辑，便于随时补刷 / 运维验证。
+     *
+     * @return true 表示刷新并校验成功
+     */
+    public boolean triggerCloseSnapshotRefresh() {
+        if (!stockHelper.isTradeDay(LocalDate.now())) {
+            log.info("今天非交易日，跳过手动收盘强制刷新");
+            return false;
+        }
+        return doCloseRefresh();
+    }
+
+    /** 真正执行“强制刷新 + 校验 + 重试”的共用逻辑（带并发锁） */
+    private boolean doCloseRefresh() {
+        if (!closeRefreshRunning.compareAndSet(false, true)) {
+            log.info("收盘强制刷新已在执行中，本次跳过");
+            return false;
+        }
+        try {
+            LocalDateTime now = LocalDateTime.now();
+            log.info("====== 收盘强制刷新开始, syncTime={} ======", now);
+            boolean ok = runCloseRefreshWithVerification(now);
+            if (ok) {
+                log.info("====== 收盘强制刷新成功, syncTime={} ======", now);
+            } else {
+                log.error("!!!!! 收盘强制刷新在多次重试后仍失败，请检查数据源(aktools)与数据库连接 !!!!!");
+            }
+            return ok;
+        } finally {
+            closeRefreshRunning.set(false);
+        }
+    }
+
+    /** 15:01 收盘强制刷新里的最大尝试次数（含首次），每次失败后自动重试。
+     *  上游 aktools 实时行情接口偶发长时间 500 / 返回 HTML 错误页，配合 executeGet 内部 3 次重试，
+     *  这里再放宽到 15 次以覆盖分钟级抖动；本方法通过 @Async 执行，重试期间不会阻塞每 5 分钟的盘中增量同步调度线程。 */
+    private static final int CLOSE_REFRESH_MAX_ATTEMPTS = 15;
+    /** 15:01 收盘强制刷新重试间隔（毫秒） */
+    private static final long CLOSE_REFRESH_RETRY_DELAY_MILLIS = 20_000L;
+
+    /**
+     * 执行一次收盘强制刷新并校验结果。刷新失败（数据源 500 / 数据库异常）会自动重试，
+     * 直到校验通过或达到最大尝试次数。
+     *
+     * @return true 表示某次尝试后校验通过（刷新确实成功落库）
+     */
+    private boolean runCloseRefreshWithVerification(LocalDateTime scheduledTime) {
+        long scheduledTs = scheduledTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        for (int attempt = 1; attempt <= CLOSE_REFRESH_MAX_ATTEMPTS; attempt++) {
+            LocalDateTime attemptNow = LocalDateTime.now();
+            Long beforeTs = parseQuoteSyncMarker();
+            long quoteCountBefore = safeCountQuote();
+            boolean quoteRefreshed = false;
+            boolean indexRefreshed = false;
+            boolean boardRefreshed = false;
+            try {
+                // 强制刷新：收盘快照必须真正落库，不走水位判断（否则与 15:00 那轮 intraday 同步的水位等价，会被跳过）
+                quoteRefreshed = syncStackQuote(attemptNow, true, true) > 0;
+                indexRefreshed = syncStockIndex(attemptNow, true);
+                boardRefreshed = syncStockBoard(attemptNow, true, true);
+            } catch (Exception e) {
+                log.error("15:01 收盘强制刷新第 {} 次执行抛异常", attempt, e);
+                if (attempt < CLOSE_REFRESH_MAX_ATTEMPTS) {
+                    sleepQuietly(CLOSE_REFRESH_RETRY_DELAY_MILLIS);
+                    continue;
+                }
+                return false;
+            }
+
+            // 校验刷新结果：核心证据是 STOCK_DAILY_LATEST 水位推进到本轮时间附近，且行情条数未退化
+            Long afterTs = parseQuoteSyncMarker();
+            long quoteCountAfter = safeCountQuote();
+            boolean markerAdvanced = afterTs != null && (beforeTs == null || afterTs > beforeTs + 1_000L);
+            boolean markerFresh = afterTs != null && afterTs >= scheduledTs - 60_000L;
+            boolean quoteOk = quoteCountAfter > 0 && quoteCountAfter >= quoteCountBefore;
+            if (markerAdvanced && markerFresh && quoteOk) {
+                log.info("15:01 收盘强制刷新校验通过 (attempt={}/{}): marker={}, quoteCount={}, "
+                                + "quoteRefreshed={}, indexRefreshed={}, boardRefreshed={}",
+                        attempt, CLOSE_REFRESH_MAX_ATTEMPTS,
+                        afterTs == null ? null
+                                : Instant.ofEpochMilli(afterTs).atZone(ZoneId.systemDefault()),
+                        quoteCountAfter, quoteRefreshed, indexRefreshed, boardRefreshed);
+                return true;
+            }
+            log.warn("15:01 收盘强制刷新校验未通过 (attempt={}/{}): beforeTs={}, afterTs={}, "
+                            + "markerAdvanced={}, markerFresh={}, quoteBefore={}, quoteAfter={}",
+                    attempt, CLOSE_REFRESH_MAX_ATTEMPTS, beforeTs, afterTs,
+                    markerAdvanced, markerFresh, quoteCountBefore, quoteCountAfter);
+            if (attempt < CLOSE_REFRESH_MAX_ATTEMPTS) {
+                sleepQuietly(CLOSE_REFRESH_RETRY_DELAY_MILLIS);
+            }
+        }
+        return false;
+    }
+
+    /** 读取行情同步水位标记 STOCK_DAILY_LATEST 的毫秒时间戳（null 表示从未同步） */
+    private Long parseQuoteSyncMarker() {
+        StockSync stockSync = stockSyncRepository.findByName(StockSyncConstant.STOCK_DAILY_LATEST);
+        return StockUtils.parseSyncTimestamp(stockSync);
+    }
+
+    /** 安全统计 stock_quote 行数（校验行情是否落库、是否退化），异常时返回 -1 */
+    private long safeCountQuote() {
+        try {
+            return stockQuoteRepository.count();
+        } catch (Exception e) {
+            log.warn("统计 stock_quote 行数失败", e);
+            return -1L;
+        }
+    }
+
+    /** 盘中增量同步里单个数据源的最大尝试次数（aktools 上游偶发 500，需要重试） */
+    private static final int INTRADAY_SYNC_MAX_ATTEMPTS = 3;
+    /** 盘中增量同步重试间隔（毫秒） */
+    private static final long INTRADAY_SYNC_RETRY_DELAY_MILLIS = 3_000L;
+
+    /**
+     * 执行盘中增量同步的单个数据源，失败重试若干次仍失败则记录日志后放弃。
+     * 单独包一层是为了让某个数据源（尤其行情接口偶发 500）失败时不拖累其余数据源。
+     */
+    private void syncWithRetry(String dataName, Runnable action) {
+        for (int attempt = 1; attempt <= INTRADAY_SYNC_MAX_ATTEMPTS; attempt++) {
+            try {
+                action.run();
+                return;
+            } catch (Exception e) {
+                if (attempt >= INTRADAY_SYNC_MAX_ATTEMPTS) {
+                    log.error("盘中增量同步[{}]失败，已尝试 {} 次，本次放弃", dataName, attempt, e);
+                    return;
+                }
+                log.warn("盘中增量同步[{}]第 {} 次失败，{}ms 后重试", dataName, attempt,
+                        INTRADAY_SYNC_RETRY_DELAY_MILLIS, e);
+                sleepQuietly(INTRADAY_SYNC_RETRY_DELAY_MILLIS);
+            }
+        }
+    }
+
+    private void sleepQuietly(long millis) {
+        try {
+            TimeUnit.MILLISECONDS.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * 是否处于 A 股连续竞价时段：交易日 09:30-11:32 / 13:00-15:02。
+     * 收盘后各留 2 分钟余量，确保能抓到最后一次收盘快照。
+     */
+    private boolean isInTradingSession(LocalDateTime now) {
+        if (!stockHelper.isTradeDay(now.toLocalDate())) {
+            return false;
+        }
+        LocalTime time = now.toLocalTime();
+        boolean morning = !time.isBefore(StockConstant.A_SHARE_MARKET_OPEN_TIME)
+                && time.isBefore(LocalTime.of(11, 32));
+        boolean afternoon = !time.isBefore(LocalTime.of(13, 0))
+                && time.isBefore(LocalTime.of(15, 2));
+        return morning || afternoon;
     }
 
     private void syncStackDtaLatest() {
@@ -188,14 +439,41 @@ public class StockSyncTask {
 
     /**
      * 同步股票行情数据
+     *
+     * @return 本次实际写入 stock_quote 的行情条数（0 表示未刷新）
      */
-    public void syncStackQuote(LocalDateTime now) {
+    public int syncStackQuote(LocalDateTime now) {
+        return syncStackQuote(now, false, false);
+    }
+
+    /**
+     * 同步股票行情数据
+     *
+     * @param skipHistoryBackfill true 表示只刷新实时行情快照、跳过历史日线回补。
+     *        历史回补要扫上千万行的 stock_quote_history，属于运维级任务，没必要在盘中
+     *        每 5 分钟跑一次；盘中增量同步走这个开关，历史缺口交给启动时的全量同步补。
+     * @return 本次实际写入 stock_quote 的行情条数（0 表示未刷新）
+     */
+    public int syncStackQuote(LocalDateTime now, boolean skipHistoryBackfill) {
+        return syncStackQuote(now, skipHistoryBackfill, false);
+    }
+
+    /**
+     * 同步股票行情数据
+     *
+     * @param skipHistoryBackfill true 表示只刷新实时行情快照、跳过历史日线回补。
+     * @param forceRefreshLatest  true 表示无视水位判断、强制重新拉取并落库最新行情快照。
+     *        用于 15:01 收盘定点刷新，确保收盘数据一定落到 stock_quote（否则会与 15:00
+     *        那轮盘中同步的水位等价，被 shouldRefreshLatestQuote 误判为已覆盖而跳过）。
+     * @return 本次实际写入 stock_quote 的行情条数（0 表示未刷新）
+     */
+    public int syncStackQuote(LocalDateTime now, boolean skipHistoryBackfill, boolean forceRefreshLatest) {
         // 获取【股票行情】最新同步时间
         StockSync stockSync = stockSyncRepository.findByName(StockSyncConstant.STOCK_DAILY_LATEST);
         // 获取最近一个收盘交易日
         LocalDate latestClosedTradeDay = stockHelper.latestClosedTradeDay(now);
 
-        boolean shouldRefreshLatestQuote = shouldRefreshLatestQuote(stockSync, now);
+        boolean shouldRefreshLatestQuote = forceRefreshLatest || shouldRefreshLatestQuote(stockSync, now);
 
         Map<String, String> localHistoryTargetMap = stockQuoteRepository.findAll().stream().collect(
                 LinkedHashMap::new,
@@ -228,8 +506,10 @@ public class StockSyncTask {
             }
         }
 
+        int savedCount = 0;
         if (latestQuoteRefreshed) {
             stockQuoteService.save(stockZhASpots, now);
+            savedCount = stockZhASpots.size();
         }
 
         boolean shouldWriteLatestHistory = latestQuoteRefreshed && stockHelper.isClosedDailyQuoteAvailable(now);
@@ -240,7 +520,11 @@ public class StockSyncTask {
                 (map, stockZhASpot) -> map.put(stockZhASpot.getCode(), stockZhASpot),
                 Map::putAll
         );
-        backfillMissingStockQuoteHistory(localHistoryTargetMap, historyEndDate, now, latestSpotMap, shouldWriteLatestHistory);
+        if (skipHistoryBackfill) {
+            log.info("本次跳过历史日线回补（盘中增量同步模式）");
+        } else {
+            backfillMissingStockQuoteHistory(localHistoryTargetMap, historyEndDate, now, latestSpotMap, shouldWriteLatestHistory);
+        }
 
         if (latestQuoteRefreshed) {
             long timestamp = now.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
@@ -251,6 +535,7 @@ public class StockSyncTask {
             stockSync.setValue(String.valueOf(timestamp));
             stockSyncRepository.save(stockSync);
         }
+        return savedCount;
     }
 
     /**
@@ -465,13 +750,26 @@ public class StockSyncTask {
         }
     }
 
+    /**
+     * 单批查询「各股票已同步最大交易日」的股票数量。
+     * <p>
+     * stock_quote_history 已上千万行，若一次性把 5000+ 个 code 塞进 IN，单条 SQL 要扫上千万索引条目、
+     * 耗时 30s 以上，会把连接读到超时（Communications link failure）并中断整个同步任务。
+     * 分批后单次只扫几十万条目，稳定在秒级。
+     */
+    private static final int MAX_TRADE_DATE_QUERY_BATCH = 500;
+
     private Map<String, String> findMaxTradeDateMap(List<String> codes, LocalDate historyEndDate) {
-        List<Object[]> rows = stockQuoteHistoryRepository
-                .findMaxTradeDateByCodeInBeforeOrEqual(codes, historyEndDate.toString());
+        String historyEnd = historyEndDate.toString();
         Map<String, String> maxTradeDateMap = new HashMap<>();
-        for (Object[] row : rows) {
-            if (row[0] != null && row[1] != null) {
-                maxTradeDateMap.put(String.valueOf(row[0]), String.valueOf(row[1]));
+        for (int start = 0; start < codes.size(); start += MAX_TRADE_DATE_QUERY_BATCH) {
+            List<String> batch = codes.subList(start, Math.min(codes.size(), start + MAX_TRADE_DATE_QUERY_BATCH));
+            List<Object[]> rows = stockQuoteHistoryRepository
+                    .findMaxTradeDateByCodeInBeforeOrEqual(batch, historyEnd);
+            for (Object[] row : rows) {
+                if (row[0] != null && row[1] != null) {
+                    maxTradeDateMap.put(String.valueOf(row[0]), String.valueOf(row[1]));
+                }
             }
         }
         return maxTradeDateMap;
@@ -507,13 +805,41 @@ public class StockSyncTask {
         }
     }
 
-    public void syncStockBoard(LocalDateTime now) {
+    /**
+     * 同步股票板块行情数据
+     *
+     * @return 是否执行了刷新（false 表示已覆盖当前窗口被跳过，或刷新失败）
+     */
+    public boolean syncStockBoard(LocalDateTime now) {
+        return syncStockBoard(now, false, false);
+    }
+
+    /**
+     * 同步股票板块行情数据
+     *
+     * @param skipHistoryBackfill true 表示只刷新板块实时快照、跳过板块历史K线回补。
+     *        板块回补是逐个板块发 HTTP（每板块 6-10s，90 个板块十几分钟），
+     *        盘中每 5 分钟跑一次会把节奏拖垮，同样留给启动全量同步。
+     * @return 是否执行了刷新（false 表示已覆盖当前窗口被跳过，或刷新失败）
+     */
+    public boolean syncStockBoard(LocalDateTime now, boolean skipHistoryBackfill) {
+        return syncStockBoard(now, skipHistoryBackfill, false);
+    }
+
+    /**
+     * 同步股票板块行情数据
+     *
+     * @param skipHistoryBackfill true 表示只刷新板块实时快照、跳过板块历史K线回补。
+     * @param forceRefreshLatest  true 表示无视水位判断、强制刷新板块实时快照（用于 15:01 收盘定点刷新）。
+     * @return 是否执行了刷新（false 表示已覆盖当前窗口被跳过，或刷新失败）
+     */
+    public boolean syncStockBoard(LocalDateTime now, boolean skipHistoryBackfill, boolean forceRefreshLatest) {
         // 获取【板块行情】最新同步时间
         StockSync stockSync = stockSyncRepository.findByName(StockSyncConstant.STOCK_BOARD_INDUSTRY_LATEST);
         // 获取最近一个收盘交易日
         LocalDate latestClosedTradeDay = stockHelper.latestClosedTradeDay(now);
 
-        boolean shouldRefreshLatestBoard = shouldRefreshLatestBoard(stockSync, now);
+        boolean shouldRefreshLatestBoard = forceRefreshLatest || shouldRefreshLatestBoard(stockSync, now);
 
         List<String> localHistoryTargets = stockIndustryBoardRepository.findAll().stream()
                 .map(StockIndustryBoard::getSectorName)
@@ -536,7 +862,7 @@ public class StockSyncTask {
                         .toList();
             } catch (Exception e) {
                 log.error("获取板块最新行情失败，终止本次板块同步，syncTime={}", now, e);
-                return;
+                return false;
             }
             if (CollectionUtils.isEmpty(stockBoardList)) {
                 log.warn("获取板块最新行情为空，无法刷新 stock_industry_board，尝试使用本地板块清单补齐历史行情");
@@ -548,11 +874,16 @@ public class StockSyncTask {
             }
         }
 
-        backfillMissingStockBoardHistory(localHistoryTargets, latestClosedTradeDay, now);
+        if (skipHistoryBackfill) {
+            log.info("本次跳过板块历史K线回补（盘中增量同步模式）");
+        } else {
+            backfillMissingStockBoardHistory(localHistoryTargets, latestClosedTradeDay, now);
+        }
         int backfilledChangeMetrics = stockIndustryBoardHistoryService.backfillMissingChangeMetrics();
         if (backfilledChangeMetrics > 0) {
             log.info("行业历史涨跌指标回补完成，更新记录数={}", backfilledChangeMetrics);
         }
+        return true;
     }
 
     private boolean shouldRefreshLatestBoard(StockSync stockSync, LocalDateTime now) {
@@ -634,9 +965,15 @@ public class StockSyncTask {
                 return false;
             }
             try {
-                executeBoardBackfill(context, timestamp);
-                log.info("同步板块历史K线完成，sectorName={}, start={}, end={}, attempt={}/{}",
-                        context.sectorName(), context.historyStart(), context.historyEnd(), attempt, totalAttempts);
+                if (executeBoardBackfill(context, timestamp)) {
+                    log.info("同步板块历史K线完成，sectorName={}, start={}, end={}, attempt={}/{}",
+                            context.sectorName(), context.historyStart(), context.historyEnd(), attempt, totalAttempts);
+                } else {
+                    // 空响应基本都是上游尚未发布该交易日数据（常见于收盘后不久触发同步），
+                    // 秒级重试没有意义，记警告后放过，等下次同步按水位自动补齐。
+                    log.warn("板块历史K线返回空数据，本次未写入库，sectorName={}, start={}, end={}",
+                            context.sectorName(), context.historyStart(), context.historyEnd());
+                }
                 return true;
             } catch (Exception e) {
                 log.error("同步板块历史K线失败，sectorName={}, end={}, attempt={}/{}",
@@ -646,12 +983,21 @@ public class StockSyncTask {
         return false;
     }
 
-    private void executeBoardBackfill(BoardBackfillContext context, LocalDateTime timestamp) {
+    /**
+     * 执行单个板块的历史K线回补。
+     *
+     * @return 是否真的拿到数据并写库。上游（同花顺板块指数）当日盘后一段时间内不返回当日数据，
+     *         接口表现为「200 + 空数组」，必须显式识别：否则会被上层当成成功、库里留下静默缺口
+     *         （2026-09-15 的板块日线整天缺失就是这么来的，且不会有任何失败日志）。
+     */
+    private boolean executeBoardBackfill(BoardBackfillContext context, LocalDateTime timestamp) {
         List<StockBoardIndustryIndexThs> detailList = aKShareIndustryService
                 .stockBoardIndustryIndexThs(context.sectorName(), context.historyStart(), context.historyEnd());
-        if (!CollectionUtils.isEmpty(detailList)) {
-            stockSyncService.stockBoardIndustryHistory(context.sectorName(), detailList, timestamp);
+        if (CollectionUtils.isEmpty(detailList)) {
+            return false;
         }
+        stockSyncService.stockBoardIndustryHistory(context.sectorName(), detailList, timestamp);
+        return true;
     }
 
     /**
@@ -1220,13 +1566,21 @@ public class StockSyncTask {
     /**
      * 同步 A 股主要股票指数行情及历史数据 (先完整补全历史日 K 线防断层，再刷新实时快照)
      */
-    public void syncStockIndex(LocalDateTime now) {
+    public boolean syncStockIndex(LocalDateTime now) {
+        return syncStockIndex(now, false);
+    }
+
+    /**
+     * @param forceRefresh true 表示无视水位判断、强制刷新指数实时快照（用于 15:01 收盘定点刷新）。
+     * @return 是否执行了刷新（false 表示已覆盖当前窗口被跳过）
+     */
+    public boolean syncStockIndex(LocalDateTime now, boolean forceRefresh) {
         StockSync stockSync = stockSyncRepository.findByName(StockSyncConstant.STOCK_INDEX_LATEST);
-        boolean shouldRefresh = shouldRefreshLatestQuote(stockSync, now);
+        boolean shouldRefresh = forceRefresh || shouldRefreshLatestQuote(stockSync, now);
 
         if (!shouldRefresh) {
             log.info("指数最新行情及历史数据已覆盖当前同步窗口，跳过指数接口调用");
-            return;
+            return false;
         }
 
         // 1. 优先增量补全核心大盘指数的历史日 K 线数据 (幂等防断层)，并暂存 dailyList 供实时接口异常时兜底
@@ -1274,6 +1628,7 @@ public class StockSyncTask {
         }
         stockSync.setValue(String.valueOf(timestamp));
         stockSyncRepository.save(stockSync);
+        return true;
     }
 
     private List<StockZhIndexSpotSina> buildFallbackSpotList(

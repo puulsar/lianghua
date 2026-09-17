@@ -53,6 +53,9 @@ public class JwtAuthFilter implements Filter {
             "/stockFund/**",
             "/stockSync/**",
 
+            // --- 数据体检（只读，运维状态看板，未登录也应可见） ---
+            "/dataHealth/**",
+
             // --- 系统工具 ---
             "/doc.html",
             "/v3/api-docs/**",

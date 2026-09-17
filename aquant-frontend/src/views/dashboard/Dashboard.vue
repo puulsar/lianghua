@@ -4,7 +4,7 @@
     <div class="overview-section-header">
       <div class="overview-title-wrap">
         <span class="overview-title">今日市场概览</span>
-        <span class="overview-update-tag">更新于 {{ sentimentData?.updateTime || '2026-08-25 14:24' }}</span>
+        <span class="overview-update-tag">更新于 {{ sentimentData?.updateTime || '2026-08-25 14:24' }}<template v-if="autoRefreshHint"> · {{ autoRefreshHint }}</template></span>
       </div>
     </div>
 
@@ -114,7 +114,7 @@
           <div class="turnover-summary-col">
             <div class="turnover-title-row">
               <span class="turnover-label">成交额</span>
-              <span class="turnover-big-val">{{ formatTurnoverNum(sentimentData?.totalTurnover) || '2.57' }}</span>
+              <span class="turnover-big-val">{{ formatTurnoverNum(sentimentData?.totalTurnover) || '--' }}</span>
               <span class="turnover-unit-text">万亿</span>
             </div>
             <div class="turnover-compare-row">
@@ -316,7 +316,13 @@
                 </button>
               </div>
             </div>
-            <div class="flow-header-extra"></div>
+            <div class="flow-header-extra">
+              <a-tooltip title="在新页面打开全屏视图" placement="left">
+                <a-button type="text" class="expand-page-btn" @click="openSectorGamePage">
+                  <template #icon><expand-outlined /></template>
+                </a-button>
+              </a-tooltip>
+            </div>
           </div>
 
           <!-- 模式一：双列排行模式 (强势板块 TOP5 + 弱势板块 TOP5) -->
@@ -332,7 +338,7 @@
                 >
                   <div class="rank-badge-num" :class="index < 3 ? 'badge-red' : 'badge-gray'">{{ index + 1 }}</div>
                   <div class="sector-name-text">{{ item.name }}</div>
-                  <div class="sector-inflow-text text-red">+{{ formatAmount(item.netInflow || 0) }}</div>
+                  <div class="sector-inflow-text text-red">{{ formatFlowAmount(item.netInflow || 0) }}</div>
                   <div class="sector-pct-text text-red">
                     {{ (item.changePercent || 0) >= 0 ? '+' : '' }}{{ (item.changePercent || 0).toFixed(2) }}%
                   </div>
@@ -354,7 +360,7 @@
                 >
                   <div class="rank-badge-num" :class="index < 3 ? 'badge-green' : 'badge-gray'">{{ index + 1 }}</div>
                   <div class="sector-name-text">{{ item.name }}</div>
-                  <div class="sector-inflow-text text-green">{{ formatAmount(item.netInflow || 0) }}</div>
+                  <div class="sector-inflow-text text-green">{{ formatFlowAmount(item.netInflow || 0) }}</div>
                   <div class="sector-pct-text text-green">
                     {{ (item.changePercent || 0) >= 0 ? '+' : '' }}{{ (item.changePercent || 0).toFixed(2) }}%
                   </div>
@@ -365,28 +371,7 @@
 
           <!-- 模式二：气泡图模式 -->
           <div class="flow-bubble-mode-body" v-show="sectorViewMode === 'bubble'">
-            <div class="chart-wrapper">
-              <a-spin :spinning="loading">
-                <div ref="chartRef" class="graph-chart-container"></div>
-              </a-spin>
-              <div class="floating-zoom-toolbar">
-                <a-tooltip title="放大视图" placement="left">
-                  <a-button type="text" class="zoom-btn" @click="handleZoomIn">
-                    <template #icon><plus-outlined /></template>
-                  </a-button>
-                </a-tooltip>
-                <a-tooltip title="缩小视图" placement="left">
-                  <a-button type="text" class="zoom-btn" @click="handleZoomOut">
-                    <template #icon><minus-outlined /></template>
-                  </a-button>
-                </a-tooltip>
-                <a-tooltip title="重置视角" placement="left">
-                  <a-button type="text" class="zoom-btn" @click="handleResetView">
-                    <template #icon><redo-outlined /></template>
-                  </a-button>
-                </a-tooltip>
-              </div>
-            </div>
+            <FundFlowGraph :data="graphData" :loading="loading" min-height="330px" />
           </div>
         </div>
       </a-col>
@@ -411,23 +396,19 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
-import * as echarts from 'echarts';
-import {
-  PlusOutlined,
-  MinusOutlined,
-  RedoOutlined
-} from '@ant-design/icons-vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ExpandOutlined } from '@ant-design/icons-vue';
+import { useRouter } from 'vue-router';
 import { getFundFlowGraph, getFundFlowSummary, type FundFlowGraphData, type FundFlowSummaryData, type FundFlowGraphNode } from '@/api/fundFlow';
 import { getCoreIndexCards, type StockIndexCardVO } from '@/api/stockIndex';
 import { getMarketSentiment, type MarketSentimentVO } from '@/api/marketSentiment';
+import { registerRefreshHandler } from '@/utils/refreshBus';
+import { isTradingTime } from '@/utils/tradingTime';
 import StockIndexHistoryChart from './components/StockIndexHistoryChart.vue';
+import FundFlowGraph from './components/FundFlowGraph.vue';
 
 const loading = ref(false);
-const chartRef = ref<HTMLDivElement | null>(null);
-let chartInstance: echarts.ECharts | null = null;
-let chartResizeObserver: ResizeObserver | null = null;
-let chartResizeFrame: number | null = null;
+const router = useRouter();
 
 const indexModalVisible = ref(false);
 const selectedIndexCard = ref<StockIndexCardVO | null>(null);
@@ -438,6 +419,12 @@ const openIndexKlineModal = (item: StockIndexCardVO) => {
   indexModalVisible.value = true;
 };
 
+/** 在新标签页打开板块资金博弈的全屏视图 */
+const openSectorGamePage = () => {
+  const target = router.resolve({ name: 'SectorCapitalGame' });
+  window.open(target.href, '_blank');
+};
+
 const summaryData = ref<FundFlowSummaryData | null>(null);
 const graphData = ref<FundFlowGraphData | null>(null);
 const indexCards = ref<StockIndexCardVO[]>([]);
@@ -445,19 +432,19 @@ const sentimentData = ref<MarketSentimentVO | null>(null);
 
 // 默认兜底强势/弱势榜数据
 const mockTopInflow: FundFlowGraphNode[] = [
-  { id: '1', name: '银行', netInflow: 2069000000, changePercent: 2.92, category: 'board', totalAmount: 5000000000, symbolSize: 50 },
-  { id: '2', name: '医疗服务', netInflow: 1451000000, changePercent: 3.99, category: 'board', totalAmount: 3000000000, symbolSize: 45 },
-  { id: '3', name: '生物制品', netInflow: 1127000000, changePercent: 2.00, category: 'board', totalAmount: 2500000000, symbolSize: 40 },
-  { id: '4', name: '电力', netInflow: 919000000, changePercent: 0.25, category: 'board', totalAmount: 2000000000, symbolSize: 38 },
-  { id: '5', name: '证券', netInflow: 901000000, changePercent: 0.30, category: 'board', totalAmount: 1800000000, symbolSize: 35 }
+  { id: '1', name: '银行', netInflow: 20.69, changePercent: 2.92, category: 'board', totalAmount: 5000000000, symbolSize: 50 },
+  { id: '2', name: '医疗服务', netInflow: 14.51, changePercent: 3.99, category: 'board', totalAmount: 3000000000, symbolSize: 45 },
+  { id: '3', name: '生物制品', netInflow: 11.27, changePercent: 2.00, category: 'board', totalAmount: 2500000000, symbolSize: 40 },
+  { id: '4', name: '电力', netInflow: 9.19, changePercent: 0.25, category: 'board', totalAmount: 2000000000, symbolSize: 38 },
+  { id: '5', name: '证券', netInflow: 9.01, changePercent: 0.30, category: 'board', totalAmount: 1800000000, symbolSize: 35 }
 ];
 
 const mockTopOutflow: FundFlowGraphNode[] = [
-  { id: '6', name: '半导体', netInflow: -15443000000, changePercent: -1.91, category: 'board', totalAmount: 8000000000, symbolSize: 55 },
-  { id: '7', name: '工业金属', netInflow: -9245000000, changePercent: -3.37, category: 'board', totalAmount: 4000000000, symbolSize: 48 },
-  { id: '8', name: '元件', netInflow: -7787000000, changePercent: -1.92, category: 'board', totalAmount: 3500000000, symbolSize: 42 },
-  { id: '9', name: '通信设备', netInflow: -5898000000, changePercent: -0.50, category: 'board', totalAmount: 3000000000, symbolSize: 38 },
-  { id: '10', name: 'IT服务', netInflow: -5776000000, changePercent: -1.31, category: 'board', totalAmount: 2800000000, symbolSize: 35 }
+  { id: '6', name: '半导体', netInflow: -154.43, changePercent: -1.91, category: 'board', totalAmount: 8000000000, symbolSize: 55 },
+  { id: '7', name: '工业金属', netInflow: -92.45, changePercent: -3.37, category: 'board', totalAmount: 4000000000, symbolSize: 48 },
+  { id: '8', name: '元件', netInflow: -77.87, changePercent: -1.92, category: 'board', totalAmount: 3500000000, symbolSize: 42 },
+  { id: '9', name: '通信设备', netInflow: -58.98, changePercent: -0.50, category: 'board', totalAmount: 3000000000, symbolSize: 38 },
+  { id: '10', name: 'IT服务', netInflow: -57.76, changePercent: -1.31, category: 'board', totalAmount: 2800000000, symbolSize: 35 }
 ];
 
 const moodTagClass = computed(() => {
@@ -530,11 +517,14 @@ const formatCleanCode = (code?: string): string => {
   return code.replace(/^(sh|sz|bj)/i, '');
 };
 
+/**
+ * 成交额统一换算成「万亿」显示。
+ * 后端 totalTurnover 单位是**元**（如 469111031057 = 0.47 万亿），
+ * 必须固定除以 1e12，否则盘中未满万亿时会退化成「亿」而与「万亿」标签错配（曾放大 1 万倍）。
+ */
 const formatTurnoverNum = (val?: number): string => {
-  if (!val) return '2.57';
-  if (val >= 1e12) return (val / 1e12).toFixed(2);
-  if (val >= 1e8) return (val / 1e8).toFixed(1);
-  return val.toFixed(0);
+  if (val === null || val === undefined) return '';
+  return (val / 1e12).toFixed(2);
 };
 
 const formatAmountBillions = (val?: number): string => {
@@ -543,15 +533,20 @@ const formatAmountBillions = (val?: number): string => {
   return (abs / 1e8).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 };
 
-const formatAmount = (val: number | null | undefined): string => {
+/**
+ * 板块资金流数值格式化。
+ * 注意：后端 /stockMarket/fundFlow/* 返回的 netInflow / totalAmount 单位**已经是「亿元」**
+ * （如半导体 -86.05 表示净流出 86.05 亿），不要再按「元」除以 1e8。
+ */
+const formatFlowAmount = (val: number | null | undefined): string => {
   if (val === null || val === undefined) return '--';
   const abs = Math.abs(val);
-  if (abs >= 1e8) {
-    return (abs / 1e8).toFixed(2) + '亿';
-  } else if (abs >= 1e4) {
-    return (abs / 1e4).toFixed(1) + '万';
+  const sign = val > 0 ? '+' : val < 0 ? '-' : '';
+  if (abs >= 10000) {
+    return sign + (abs / 10000).toFixed(2) + '万亿';
   }
-  return abs.toFixed(0) + '元';
+  // 统一保留两位小数；小额也用「亿」而不是换算成「万」，保证整列单位一致
+  return sign + abs.toFixed(2) + '亿';
 };
 
 const getSparklinePath = (prices?: number[]): string => {
@@ -573,8 +568,17 @@ const getSparklinePath = (prices?: number[]): string => {
   return `M ${points.join(' L ')}`;
 };
 
-const loadData = () => {
-  loading.value = true;
+/** 首页自动刷新间隔（毫秒）：每分钟一次 */
+const AUTO_REFRESH_MS = 60_000;
+
+/**
+ * @param silent 静默刷新：后台自动刷新时不置 loading，避免图表每分钟闪一次加载动画，
+ *               由「更新于 xx:xx」时间戳作为反馈；用户手动点刷新时仍显示加载态。
+ */
+const loadData = (silent = false): Promise<unknown> => {
+  if (!silent) {
+    loading.value = true;
+  }
 
   // 1. 全市场涨跌分布与市场总览
   const sentimentPromise = getMarketSentiment()
@@ -614,265 +618,64 @@ const loadData = () => {
     .then(res => {
       if (res.data?.data) {
         graphData.value = res.data.data;
-        if (sectorViewMode.value === 'bubble') {
-          nextTick(() => renderChart());
-        }
       }
     })
     .catch(error => {
       console.error('加载资金博弈关系图失败:', error);
     });
 
-  Promise.allSettled([sentimentPromise, summaryPromise, indexCardsPromise, graphPromise]).finally(() => {
+  return Promise.allSettled([sentimentPromise, summaryPromise, indexCardsPromise, graphPromise]).finally(() => {
     loading.value = false;
   });
 };
 
-watch(sectorViewMode, (newVal) => {
-  if (newVal === 'bubble') {
-    nextTick(() => {
-      renderChart();
-    });
+// 响应顶部导航的「刷新」按钮：重新拉取首页全部数据
+let unregisterRefresh: (() => void) | null = null;
+
+// 每分钟自动刷新；手动刷新后重置计时，避免两者挨在一起触发
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 首页标题栏显示的自动刷新状态提示 */
+const autoRefreshHint = ref('');
+
+const syncAutoRefreshHint = () => {
+  autoRefreshHint.value = isTradingTime() ? '自动刷新中' : '非交易时段不自动刷新';
+};
+
+const stopAutoRefresh = () => {
+  if (refreshTimer !== null) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
   }
-});
+};
 
-const renderChart = () => {
-  if (!chartRef.value || !graphData.value) return;
-
-  if (!chartInstance) {
-    chartInstance = echarts.init(chartRef.value);
-  }
-
-  const nodes = (graphData.value.nodes || []).map(node => {
-    let color = '#94a3b8';
-    if (node.changePercent !== null && node.changePercent !== undefined) {
-      if (node.changePercent > 0) {
-        color = node.changePercent > 3 ? '#c53030' : '#e05454';
-      } else if (node.changePercent < 0) {
-        color = node.changePercent < -3 ? '#15803d' : '#1ea55b';
-      }
+const startAutoRefresh = () => {
+  stopAutoRefresh();
+  // 定时器常驻、每个 tick 再判断时段：这样页面挂着过夜，9:30 开盘后能自己恢复刷新
+  refreshTimer = setInterval(() => {
+    syncAutoRefreshHint();
+    // 标签页在后台、或非交易时段时跳过，不发无效请求
+    if (document.hidden || !isTradingTime()) {
+      return;
     }
-
-    return {
-      id: node.id,
-      name: node.name,
-      symbolSize: node.symbolSize || 40,
-      itemStyle: {
-        color: color,
-        shadowBlur: 8,
-        shadowColor: 'rgba(0, 0, 0, 0.15)'
-      },
-      label: {
-        show: true,
-        fontSize: 11,
-        color: '#ffffff',
-        fontWeight: 'bold' as const,
-        textShadowBlur: 3,
-        textShadowColor: 'rgba(0, 0, 0, 0.5)',
-        textShadowOffsetX: 1,
-        textShadowOffsetY: 1
-      },
-      raw: node
-    };
-  });
-
-  const links = (graphData.value.links || []).map(link => ({
-    source: link.source,
-    target: link.target,
-    lineStyle: {
-      width: link.weight || 2,
-      curveness: 0.2,
-      color: '#cbd5e1',
-      opacity: 0.6
-    }
-  }));
-
-  const option: echarts.EChartsOption = {
-    backgroundColor: 'transparent',
-    tooltip: {
-      trigger: 'item',
-      formatter: (params: any) => {
-        if (params.dataType === 'node') {
-          const raw = params.data.raw;
-          const netInflowStr = raw.netInflow ? (raw.netInflow > 0 ? '+' : '') + formatAmount(raw.netInflow) : '--';
-          const pctStr = raw.changePercent !== null ? (raw.changePercent > 0 ? '+' : '') + raw.changePercent + '%' : '--';
-          return `
-            <div style="font-weight:bold;margin-bottom:4px;">${raw.name}</div>
-            <div>涨跌幅: <span style="font-weight:bold;color:${raw.changePercent >= 0 ? '#e05454' : '#1ea55b'}">${pctStr}</span></div>
-            <div>主力净流入: <span style="font-weight:bold;">${netInflowStr}</span></div>
-          `;
-        }
-        return '';
-      }
-    },
-    series: [
-      {
-        type: 'graph',
-        layout: 'force',
-        data: nodes,
-        links: links,
-        roam: true,
-        label: {
-          position: 'inside',
-          formatter: '{b}'
-        },
-        force: {
-          repulsion: 180,
-          gravity: 0.08,
-          edgeLength: [50, 120],
-          friction: 0.6
-        },
-        center: ['50%', '50%'],
-        zoom: 0.9,
-        edgeSymbol: ['none', 'arrow'],
-        edgeSymbolSize: [4, 8],
-        cursor: 'pointer'
-      }
-    ]
-  };
-
-  chartInstance.setOption(option);
-  chartInstance.resize();
-
-  if (chartRef.value) {
-    chartRef.value.removeEventListener('mousedown', handleGraphMouseDown);
-    chartRef.value.addEventListener('mousedown', handleGraphMouseDown);
-    chartRef.value.removeEventListener('wheel', handleGraphWheel);
-    chartRef.value.addEventListener('wheel', handleGraphWheel, { passive: false });
-    chartRef.value.style.cursor = 'grab';
-  }
-};
-
-let isDraggingGraph = false;
-let startGraphX = 0;
-let startGraphY = 0;
-
-const handleGraphMouseDown = (e: MouseEvent) => {
-  if (e.button !== 0 || !chartInstance) return;
-  isDraggingGraph = true;
-  startGraphX = e.clientX;
-  startGraphY = e.clientY;
-  if (chartRef.value) {
-    chartRef.value.style.cursor = 'grabbing';
-  }
-};
-
-const handleGraphMouseMove = (e: MouseEvent) => {
-  if (!isDraggingGraph || !chartInstance) return;
-  const dx = e.clientX - startGraphX;
-  const dy = e.clientY - startGraphY;
-  startGraphX = e.clientX;
-  startGraphY = e.clientY;
-
-  chartInstance.dispatchAction({
-    type: 'graphRoam',
-    dx: dx,
-    dy: dy
-  });
-};
-
-const handleGraphMouseUp = () => {
-  if (isDraggingGraph) {
-    isDraggingGraph = false;
-    if (chartRef.value) {
-      chartRef.value.style.cursor = 'grab';
-    }
-  }
-};
-
-const handleZoomIn = () => {
-  if (!chartInstance) return;
-  const width = chartInstance.getWidth();
-  const height = chartInstance.getHeight();
-  chartInstance.dispatchAction({
-    type: 'graphRoam',
-    zoom: 1.25,
-    originX: width / 2,
-    originY: height / 2
-  });
-};
-
-const handleZoomOut = () => {
-  if (!chartInstance) return;
-  const width = chartInstance.getWidth();
-  const height = chartInstance.getHeight();
-  chartInstance.dispatchAction({
-    type: 'graphRoam',
-    zoom: 0.8,
-    originX: width / 2,
-    originY: height / 2
-  });
-};
-
-const handleResetView = () => {
-  if (!chartInstance) return;
-  renderChart();
-};
-
-const handleGraphWheel = (e: WheelEvent) => {
-  if (!chartInstance) return;
-  e.preventDefault();
-  const zoom = e.deltaY < 0 ? 1.1 : 0.9;
-  const rect = chartRef.value?.getBoundingClientRect();
-  const originX = rect ? e.clientX - rect.left : 0;
-  const originY = rect ? e.clientY - rect.top : 0;
-
-  chartInstance.dispatchAction({
-    type: 'graphRoam',
-    zoom: zoom,
-    originX: originX,
-    originY: originY
-  });
-};
-
-const handleResize = () => {
-  if (chartInstance) {
-    chartInstance.resize();
-  }
-};
-
-const observeChartSize = () => {
-  if (!chartRef.value || typeof ResizeObserver === 'undefined') return;
-  chartResizeObserver?.disconnect();
-  chartResizeObserver = new ResizeObserver(entries => {
-    const entry = entries[0];
-    if (!entry || entry.contentRect.width <= 0 || entry.contentRect.height <= 0) return;
-    if (chartResizeFrame !== null) {
-      cancelAnimationFrame(chartResizeFrame);
-    }
-    chartResizeFrame = requestAnimationFrame(() => {
-      chartResizeFrame = null;
-      chartInstance?.resize();
-    });
-  });
-  chartResizeObserver.observe(chartRef.value);
+    void loadData(true);
+  }, AUTO_REFRESH_MS);
 };
 
 onMounted(() => {
   loadData();
-  nextTick(observeChartSize);
-  window.addEventListener('resize', handleResize);
-  window.addEventListener('mousemove', handleGraphMouseMove);
-  window.addEventListener('mouseup', handleGraphMouseUp);
+  syncAutoRefreshHint();
+  unregisterRefresh = registerRefreshHandler(async () => {
+    await loadData();
+    startAutoRefresh();
+  });
+  startAutoRefresh();
 });
 
 onUnmounted(() => {
-  chartResizeObserver?.disconnect();
-  chartResizeObserver = null;
-  if (chartResizeFrame !== null) {
-    cancelAnimationFrame(chartResizeFrame);
-    chartResizeFrame = null;
-  }
-  window.removeEventListener('resize', handleResize);
-  window.removeEventListener('mousemove', handleGraphMouseMove);
-  window.removeEventListener('mouseup', handleGraphMouseUp);
-  if (chartRef.value) {
-    chartRef.value.removeEventListener('wheel', handleGraphWheel);
-  }
-  if (chartInstance) {
-    chartInstance.dispose();
-    chartInstance = null;
-  }
+  stopAutoRefresh();
+  unregisterRefresh?.();
+  unregisterRefresh = null;
 });
 </script>
 
@@ -1595,6 +1398,24 @@ onUnmounted(() => {
 
 .flow-header-extra {
   justify-self: end;
+  display: flex;
+  align-items: center;
+}
+
+.expand-page-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-size: 14px;
+  border-radius: 6px;
+}
+
+.expand-page-btn:hover {
+  color: #e05454;
+  background: #f1f5f9;
 }
 
 .flow-rank-mode-body {
@@ -1709,43 +1530,6 @@ onUnmounted(() => {
   min-height: 330px;
 }
 
-.chart-wrapper {
-  width: 100%;
-  position: relative;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.graph-chart-container {
-  width: 100%;
-  flex: 1;
-  height: 100%;
-  min-height: 330px;
-}
-
-.floating-zoom-toolbar {
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
-  display: flex;
-  flex-direction: column;
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-  overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-}
-
-.zoom-btn {
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-}
 
 /* 颜色工具类 */
 .text-red {

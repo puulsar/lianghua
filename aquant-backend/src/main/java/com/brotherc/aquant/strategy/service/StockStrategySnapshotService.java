@@ -22,6 +22,8 @@ import com.brotherc.aquant.strategy.repository.StockStrategyGridBacktestSnapshot
 import com.brotherc.aquant.sync.repository.StockSyncRepository;
 import com.brotherc.aquant.stock.model.dto.StockQuoteHistoryProjection;
 import com.brotherc.aquant.common.utils.StockHelper;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import jakarta.persistence.criteria.CriteriaBuilder;
 import jakarta.persistence.criteria.CriteriaQuery;
 import jakarta.persistence.criteria.Expression;
@@ -33,6 +35,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.math3.stat.inference.TTest;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
@@ -62,6 +65,10 @@ public class StockStrategySnapshotService {
     private static final int SNAPSHOT_BATCH_SIZE = 200;
     private static final int MAX_NEED_DAYS = 5 * 250 + 120;
     private static final BigDecimal HUNDRED = new BigDecimal("100");
+
+    /** 仅用于分片释放持久化上下文，见 {@link #releasePersistenceContext()}。 */
+    @PersistenceContext
+    private EntityManager entityManager;
 
     private final DualMovingAverageStrategy dualMovingAverageStrategy;
     private final MomentumStrategy momentumStrategy;
@@ -104,13 +111,11 @@ public class StockStrategySnapshotService {
         }
 
         Sort sort = pageable != null ? pageable.getSort() : Sort.unsorted();
-        Pageable queryPageable = buildSnapshotQueryPageable(pageable, sort);
-
-        return dualMaSnapshotRepository.findAll(
-                        buildDualMaSnapshotSpec(batchNo, market, reqVO, watchlistCodes, sort),
-                        queryPageable
-                )
-                .map(this::toVO);
+        // 加载全量（不做可靠度过滤/分页），FDR 与过滤排序由 StockStrategyService 对完整集合统一处理
+        List<StockTradeBacktestVO> all = dualMaSnapshotRepository.findAll(
+                        buildDualMaSnapshotSpec(batchNo, market, reqVO, watchlistCodes, sort)
+                ).stream().map(this::toVO).toList();
+        return new PageImpl<>(all, pageable != null ? pageable : Pageable.unpaged(), all.size());
     }
 
     public Page<StockTradeBacktestVO> queryMomentumBacktestSnapshot(
@@ -135,11 +140,10 @@ public class StockStrategySnapshotService {
         }
 
         Sort sort = pageable != null ? pageable.getSort() : Sort.unsorted();
-        Pageable queryPageable = buildSnapshotQueryPageable(pageable, sort);
-
-        return momentumSnapshotRepository.findAll(
-                buildMomentumSnapshotSpec(batchNo, market, reqVO, watchlistCodes, sort), queryPageable
-        ).map(this::toVO);
+        List<StockTradeBacktestVO> all = momentumSnapshotRepository.findAll(
+                buildMomentumSnapshotSpec(batchNo, market, reqVO, watchlistCodes, sort)
+        ).stream().map(this::toVO).toList();
+        return new PageImpl<>(all, pageable != null ? pageable : Pageable.unpaged(), all.size());
     }
 
     public Page<StockTradeBacktestVO> queryMacdBacktestSnapshot(
@@ -160,10 +164,10 @@ public class StockStrategySnapshotService {
             return null;
         }
         Sort sort = pageable != null ? pageable.getSort() : Sort.unsorted();
-        Pageable queryPageable = buildSnapshotQueryPageable(pageable, sort);
-        return macdSnapshotRepository.findAll(
-                buildMacdSnapshotSpec(batchNo, market, reqVO, watchlistCodes, sort), queryPageable
-        ).map(this::toVO);
+        List<StockTradeBacktestVO> all = macdSnapshotRepository.findAll(
+                buildMacdSnapshotSpec(batchNo, market, reqVO, watchlistCodes, sort)
+        ).stream().map(this::toVO).toList();
+        return new PageImpl<>(all, pageable != null ? pageable : Pageable.unpaged(), all.size());
     }
 
     public Page<StockTradeBacktestVO> queryGridBacktestSnapshot(
@@ -183,10 +187,10 @@ public class StockStrategySnapshotService {
             return null;
         }
         Sort sort = pageable != null ? pageable.getSort() : Sort.unsorted();
-        Pageable queryPageable = buildSnapshotQueryPageable(pageable, sort);
-        return gridSnapshotRepository.findAll(
-                buildGridSnapshotSpec(batchNo, market, reqVO, watchlistCodes, sort), queryPageable
-        ).map(this::toVO);
+        List<StockTradeBacktestVO> all = gridSnapshotRepository.findAll(
+                buildGridSnapshotSpec(batchNo, market, reqVO, watchlistCodes, sort)
+        ).stream().map(this::toVO).toList();
+        return new PageImpl<>(all, pageable != null ? pageable : Pageable.unpaged(), all.size());
     }
 
     public boolean isPresetRequest(DualMABacktestReqVO reqVO) {
@@ -216,8 +220,13 @@ public class StockStrategySnapshotService {
 
     public boolean isGridPresetRequest(GridBacktestReqVO reqVO) {
         StrategyConfig.Grid cfg = strategyConfigService.getGrid();
+        if (reqVO.getGridRate() == null) {
+            return false;
+        }
+        // cfg.rate 是百分比（3 表示 3%），快照落库时为 rate/100，因此这里必须同样换算后再比较
+        BigDecimal presetRate = BigDecimal.valueOf(cfg.getRate()).divide(HUNDRED);
         return isPresetMarket(reqVO.getMarket())
-                && BigDecimal.valueOf(cfg.getRate()).compareTo(reqVO.getGridRate()) == 0
+                && presetRate.compareTo(reqVO.getGridRate()) == 0
                 && Integer.valueOf(cfg.getCount()).equals(reqVO.getGridCount())
                 && contains(cfg.getYears(), reqVO.getRecentYears());
     }
@@ -448,6 +457,7 @@ public class StockStrategySnapshotService {
             }
 
             dualMaSnapshotRepository.saveAll(snapshots);
+            releasePersistenceContext();
             log.info("双均线回测快照已生成，market={}, batchNo={}, progress={}/{}", market, batchNo,
                     Math.min(b + SNAPSHOT_BATCH_SIZE, stocks.size()), stocks.size());
         }
@@ -495,6 +505,7 @@ public class StockStrategySnapshotService {
             }
 
             momentumSnapshotRepository.saveAll(snapshots);
+            releasePersistenceContext();
             log.info("动量回测快照已生成，market={}, batchNo={}, progress={}/{}", market, batchNo,
                     Math.min(b + SNAPSHOT_BATCH_SIZE, stocks.size()), stocks.size());
         }
@@ -532,6 +543,7 @@ public class StockStrategySnapshotService {
                 }
             }
             macdSnapshotRepository.saveAll(snapshots);
+            releasePersistenceContext();
             log.info("MACD回测快照已生成，market={}, batchNo={}, progress={}/{}", market, batchNo,
                     Math.min(batchStart + SNAPSHOT_BATCH_SIZE, stocks.size()), stocks.size());
         }
@@ -569,9 +581,24 @@ public class StockStrategySnapshotService {
                 }
             }
             gridSnapshotRepository.saveAll(snapshots);
+            releasePersistenceContext();
             log.info("网格交易回测快照已生成，market={}, batchNo={}, progress={}/{}", market, batchNo,
                     Math.min(batchStart + SNAPSHOT_BATCH_SIZE, stocks.size()), stocks.size());
         }
+    }
+
+    /**
+     * 分片释放持久化上下文。
+     *
+     * <p>快照刷新是「一个市场一个事务」：单市场最多五千余只股票，每只再乘上若干组参数，
+     * 全部实体若一直留在持久化上下文里直到事务提交，堆会被逐步吃满。启动时的自动全量同步
+     * 尤其危险——快照刷新排在最末尾，前面已经跑完行情 / 估值 / 杜邦 / 成长性四轮同步，
+     * 于是这里一抛 {@code OutOfMemoryError}，整个事务回滚，后面三个策略的刷新也一并不会执行。
+     * 每批落库后立即 {@code flush + clear}，把内存占用压回单批（200 只 × 参数组数）的规模。
+     */
+    private void releasePersistenceContext() {
+        entityManager.flush();
+        entityManager.clear();
     }
 
     private StockStrategyDualMaBacktestSnapshot toSnapshot(
@@ -746,9 +773,6 @@ public class StockStrategySnapshotService {
                 predicates.add(cb.equal(root.get("code"), reqVO.getCode()));
             }
 
-            if (StringUtils.isNotBlank(reqVO.getReliability())) {
-                predicates.add(cb.equal(root.get(RELIABILITY), reqVO.getReliability()));
-            }
 
             if (watchlistCodes != null) {
                 List<Predicate> orPredicates = new ArrayList<>();
@@ -781,9 +805,6 @@ public class StockStrategySnapshotService {
                 predicates.add(cb.equal(root.get("code"), reqVO.getCode()));
             }
 
-            if (StringUtils.isNotBlank(reqVO.getReliability())) {
-                predicates.add(cb.equal(root.get(RELIABILITY), reqVO.getReliability()));
-            }
 
             if (watchlistCodes != null) {
                 List<Predicate> orPredicates = new ArrayList<>();
@@ -816,9 +837,6 @@ public class StockStrategySnapshotService {
             if (StringUtils.isNotBlank(reqVO.getCode())) {
                 predicates.add(cb.equal(root.get("code"), reqVO.getCode()));
             }
-            if (StringUtils.isNotBlank(reqVO.getReliability())) {
-                predicates.add(cb.equal(root.get(RELIABILITY), reqVO.getReliability()));
-            }
             if (watchlistCodes != null) {
                 List<Predicate> orPredicates = new ArrayList<>();
                 for (String watchlistCode : watchlistCodes) {
@@ -847,9 +865,6 @@ public class StockStrategySnapshotService {
             predicates.add(cb.equal(root.get("recentYears"), reqVO.getRecentYears()));
             if (StringUtils.isNotBlank(reqVO.getCode())) {
                 predicates.add(cb.equal(root.get("code"), reqVO.getCode()));
-            }
-            if (StringUtils.isNotBlank(reqVO.getReliability())) {
-                predicates.add(cb.equal(root.get(RELIABILITY), reqVO.getReliability()));
             }
             if (watchlistCodes != null) {
                 List<Predicate> orPredicates = new ArrayList<>();

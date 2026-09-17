@@ -24,6 +24,11 @@ const router = createRouter({
                             path: '',
                             name: 'Dashboard',
                             component: () => import('@/views/dashboard/Dashboard.vue')
+                        },
+                        {
+                            path: 'sector-capital',
+                            name: 'SectorCapitalGame',
+                            component: () => import('@/views/dashboard/SectorCapitalGame.vue')
                         }
                     ]
                 },
@@ -47,6 +52,17 @@ const router = createRouter({
                             path: 'index',
                             name: 'StockData',
                             component: () => import('@/views/stock-data/StockData.vue')
+                        }
+                    ]
+                },
+                {
+                    path: 'data-health',
+                    name: 'DataHealthRoot',
+                    children: [
+                        {
+                            path: 'index',
+                            name: 'DataHealth',
+                            component: () => import('@/views/data-health/DataHealth.vue')
                         }
                     ]
                 },

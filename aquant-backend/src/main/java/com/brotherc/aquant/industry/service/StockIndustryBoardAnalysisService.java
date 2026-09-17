@@ -30,6 +30,17 @@ public class StockIndustryBoardAnalysisService {
 
     @Transactional(readOnly = true)
     public List<IndustryRiseAnalysisVO> analysis(LocalDate startDate, LocalDate endDate, Integer rankLimit) {
+        return analysis(startDate, endDate, rankLimit, false);
+    }
+
+    /**
+     * 行业涨跌幅排名分析。
+     *
+     * @param fallRanking false=按涨幅从高到低排名（默认）；true=按跌幅从深到浅排名（跌幅最大的排第 1）
+     */
+    @Transactional(readOnly = true)
+    public List<IndustryRiseAnalysisVO> analysis(LocalDate startDate, LocalDate endDate, Integer rankLimit,
+                                                 boolean fallRanking) {
         validateDateRange(startDate, endDate);
         validateRankLimit(rankLimit);
 
@@ -44,8 +55,11 @@ public class StockIndustryBoardAnalysisService {
             }
         }
 
-        Comparator<StockIndustryBoardHistory> rankingComparator = Comparator
-                .comparing(StockIndustryBoardHistory::getChangePercent, Comparator.reverseOrder())
+        Comparator<StockIndustryBoardHistory> rankingComparator = fallRanking
+                ? Comparator.comparing(StockIndustryBoardHistory::getChangePercent)
+                .thenComparing(StockIndustryBoardHistory::getSectorName,
+                        Comparator.nullsLast(String::compareTo))
+                : Comparator.comparing(StockIndustryBoardHistory::getChangePercent, Comparator.reverseOrder())
                 .thenComparing(StockIndustryBoardHistory::getSectorName,
                         Comparator.nullsLast(String::compareTo));
 

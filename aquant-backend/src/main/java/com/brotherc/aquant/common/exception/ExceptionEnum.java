@@ -16,6 +16,7 @@ public enum ExceptionEnum {
     STOCK_STRATEGY_GRID_PARAMS_ILLEGAL(1000112, "网格参数非法，网格比例应大于0且小于50%，网格层数应为1至50"),
     STOCK_STRATEGY_TYPE_ILLEGAL(1000115, "策略类型或回测参数非法"),
     STOCK_STRATEGY_BACKTEST_SAMPLE_INSUFFICIENT(1000116, "股票历史行情不足，无法生成回测详情"),
+    STOCK_STRATEGY_CALC_BUSY(1000117, "回测计算繁忙，请稍后再试"),
     STOCK_SYNC_NOT_START(1000102, "非交易日时间无需同步"),
     STOCK_REFRESH_FREQUENT(1000103, "1分钟内请勿重复刷新"),
     STOCK_INDUSTRY_BOARD_UN_EXIST(1000104, "行业板块不存在"),

@@ -25,8 +25,11 @@
                 :popupClassName="group.popupClassName"
               >
                 <template #title>
-                  <component :is="group.icon" />
-                  <span class="nav-text">{{ group.title }}</span>
+                  <!-- 点击父项 = 直接进第一个子页；悬停仍可展开完整子菜单 -->
+                  <span class="nav-parent" @click="goFirstChild(group)">
+                    <component :is="group.icon" />
+                    <span class="nav-text">{{ group.title }}</span>
+                  </span>
                 </template>
                 <a-menu-item
                   v-for="child in group.children"
@@ -227,8 +230,9 @@ const navigationGroups: NavigationGroup[] = [
     children: [
       { key: '/stock-data/index', label: '股票' },
       { key: '/board/index', label: '行业板块' },
-      { key: '/industry-analysis/index', label: '行业涨幅分析' },
-      { key: '/fund/index', label: '基金' }
+      { key: '/industry-analysis/index', label: '行业涨跌幅分析' },
+      { key: '/fund/index', label: '基金' },
+      { key: '/data-health/index', label: '数据体检' }
     ]
   },
   {
@@ -244,13 +248,11 @@ const navigationGroups: NavigationGroup[] = [
     ]
   },
   {
+    // 只有一个子页，直接给 path：点一次「量化」即进策略页，不再弹一层子菜单
     key: '/strategy',
     title: '量化',
     icon: RadarChartOutlined,
-    popupClassName: 'top-nav-popup top-nav-popup-compact',
-    children: [
-      { key: '/strategy/index', label: '策略' }
-    ]
+    path: '/strategy/index'
   },
   {
     key: '/article',
@@ -274,6 +276,14 @@ const currentRouteMeta = computed(() => {
   }
   if (route.path === '/industry-detail/index') {
     return { parent: '市场数据', child: '行业详情' };
+  }
+  // 板块资金博弈全屏页：挂在大盘全景下
+  if (route.path === '/dashboard/sector-capital') {
+    return { parent: '大盘全景', child: '板块资金博弈' };
+  }
+  // 量化（点击直达策略页）：面包屑保持「量化 / 策略」，否则会退化成「量化 / 量化」
+  if (route.path === '/strategy/index') {
+    return { parent: '量化', child: '策略' };
   }
   for (const group of navigationGroups) {
     if (group.path && group.path === route.path) {
@@ -324,6 +334,15 @@ const handleNavigate = (path: string) => {
 const handleDrawerNavigate = (path: string) => {
   navDrawerVisible.value = false;
   handleNavigate(path);
+};
+
+// 点击顶部导航的父级菜单 = 直接进它的第一个子页面
+// （子菜单仍可悬停展开，用来访问其余子页面）
+const goFirstChild = (group: NavigationGroup) => {
+  const first = group.children && group.children[0];
+  if (first) {
+    handleNavigate(first.key);
+  }
 };
 
 const openNavDrawer = () => {
@@ -411,6 +430,7 @@ const handleUpdateEmail = async () => {
   display: flex;
   align-items: center;
   flex-shrink: 0;
+  gap: 6px;
 }
 
 .menu-box {
@@ -449,6 +469,13 @@ const handleUpdateEmail = async () => {
 .c-menu :deep(.ant-menu-submenu-title .anticon) {
   margin-right: 4px;
   font-size: 14px;
+}
+
+/* 父级导航标题：整块可点，点击直接进第一个子页 */
+.nav-parent {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
 }
 
 .nav-text {

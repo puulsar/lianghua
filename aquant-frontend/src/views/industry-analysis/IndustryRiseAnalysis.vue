@@ -30,7 +30,7 @@
           size="small"
           class="refresh-button"
           :loading="loading"
-          title="刷新行业涨幅分析"
+          title="刷新行业涨跌幅分析"
           @click="loadAnalysis"
         >
           <template #icon><sync-outlined /></template>
@@ -66,6 +66,34 @@
         <div v-if="loading" class="loading-state"><a-spin /></div>
       </div>
     </div>
+
+    <div class="analysis-surface fall-surface">
+      <div class="surface-header">
+        <div>
+          <h1>行业跌幅排名热力图</h1>
+          <p>默认展示最近 10 个交易日；当前展示每日跌幅前 {{ rankLimit }} 名</p>
+        </div>
+        <div class="heat-scale" aria-label="涨跌幅颜色图例">
+          <span>-6%</span>
+          <div class="heat-scale-colors">
+            <i
+              v-for="(color, index) in FALL_HEAT_SCALE_COLORS"
+              :key="index"
+              :style="{ backgroundColor: color }"
+            ></i>
+          </div>
+          <span>+6%</span>
+        </div>
+      </div>
+
+      <div class="chart-shell" :class="{ 'is-loading': loading }">
+        <div ref="fallChartRef" class="analysis-chart" :style="chartStyle"></div>
+        <div v-if="!loading && fallMatrix.cells.length === 0" class="empty-state">
+          <a-empty description="所选日期范围暂无行业行情数据" />
+        </div>
+        <div v-if="loading" class="loading-state"><a-spin /></div>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -95,6 +123,7 @@ const restoredViewState = route.query.restore === '1'
   : null;
 const chartRef = ref<HTMLDivElement | null>(null);
 const chartShellRef = ref<HTMLDivElement | null>(null);
+const fallChartRef = ref<HTMLDivElement | null>(null);
 const isMounted = ref(false);
 const loading = ref(false);
 const lastUpdated = ref('');
@@ -111,6 +140,9 @@ const dateRange = ref<[string, string]>(restoredViewState
   ? [restoredViewState.startDate, restoredViewState.endDate]
   : [dayjs().subtract(29, 'day').format('YYYY-MM-DD'), dayjs().format('YYYY-MM-DD')]);
 const matrix = ref<IndustryAnalysisMatrix>({ dates: [], ranks: [], cells: [] });
+const fallMatrix = ref<IndustryAnalysisMatrix>({ dates: [], ranks: [], cells: [] });
+// 跌幅图图例色带方向反转：绿（-6%）→ 红（+6%）
+const FALL_HEAT_SCALE_COLORS = [...INDUSTRY_HEAT_SCALE_COLORS].reverse();
 const defaultTradingDayLimit = ref(!restoredViewState);
 const rankLimit = ref(restoredViewState?.rankLimit ?? 20);
 const pendingScrollPosition = ref(restoredViewState
@@ -126,6 +158,7 @@ const chartStyle = computed(() => ({
 }));
 
 let chart: echarts.ECharts | null = null;
+let fallChart: echarts.ECharts | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
 const handleDateChange = () => {
@@ -161,12 +194,16 @@ const loadAnalysis = async () => {
   }
   loading.value = true;
   try {
-    const response = await getIndustrySourceAnalysis({
+    const requestParams = {
       source: source.value,
       startDate,
       endDate,
       rankLimit: rankLimit.value
-    });
+    };
+    const [response, fallResponse] = await Promise.all([
+      getIndustrySourceAnalysis({ ...requestParams, order: 'rise' }),
+      getIndustrySourceAnalysis({ ...requestParams, order: 'fall' })
+    ]);
     if (response.data.success || response.data.code === 0) {
       const snapshot = response.data.data;
       if (snapshot.effectiveSource !== source.value || snapshot.fallback) {
@@ -188,6 +225,14 @@ const loadAnalysis = async () => {
       lastUpdated.value = dayjs().format('YYYY-MM-DD HH:mm:ss');
       await nextTick();
       renderChart();
+      if (fallResponse.data.success || fallResponse.data.code === 0) {
+        fallMatrix.value = buildIndustryAnalysisMatrix(
+          fallResponse.data.data.content as IndustryRiseAnalysisPoint[],
+          defaultTradingDayLimit.value ? 10 : 120,
+          rankLimit.value
+        );
+        renderFallChart();
+      }
     }
   } catch (error) {
     console.error('Failed to load industry rise analysis:', error);
@@ -196,38 +241,44 @@ const loadAnalysis = async () => {
   }
 };
 
-const renderChart = () => {
-  if (!chartRef.value) {
-    return;
-  }
-  if (!chart) {
-    chart = echarts.init(chartRef.value);
-    chart.on('click', params => {
+const navigateToSector = (sectorName: string, shell: HTMLElement | null) => {
+  const [startDate, endDate] = dateRange.value;
+  router.push({
+    path: '/industry-detail/index',
+    query: {
+      industry: sectorName,
+      source: source.value,
+      from: 'industry-analysis',
+      ...buildIndustryAnalysisStateQuery({
+        startDate,
+        endDate,
+        rankLimit: rankLimit.value,
+        scrollLeft: shell?.scrollLeft ?? 0,
+        scrollTop: shell?.scrollTop ?? 0
+      })
+    }
+  });
+};
+
+/** 涨幅/跌幅热力图共用渲染：结构相同，仅 Y 轴含义不同 */
+const renderHeatChart = (
+  target: HTMLDivElement,
+  existing: echarts.ECharts | null,
+  matrixValue: IndustryAnalysisMatrix,
+  yAxisName: string
+): echarts.ECharts => {
+  const chartInstance = existing ?? echarts.init(target);
+  if (!existing) {
+    chartInstance.on('click', params => {
       const value = params.value as unknown[] | undefined;
       const sectorName = value?.[4];
       if (typeof sectorName === 'string') {
-        const [startDate, endDate] = dateRange.value;
-        const shell = chartShellRef.value;
-        router.push({
-          path: '/industry-detail/index',
-          query: {
-            industry: sectorName,
-            source: source.value,
-            from: 'industry-analysis',
-            ...buildIndustryAnalysisStateQuery({
-              startDate,
-              endDate,
-              rankLimit: rankLimit.value,
-              scrollLeft: shell?.scrollLeft ?? 0,
-              scrollTop: shell?.scrollTop ?? 0
-            })
-          }
-        });
+        navigateToSector(sectorName, target.parentElement);
       }
     });
   }
 
-  const seriesData = matrix.value.cells.map(cell => [
+  const seriesData = matrixValue.cells.map(cell => [
     cell.xIndex,
     cell.yIndex,
     cell.changePercent,
@@ -237,7 +288,7 @@ const renderChart = () => {
     cell.rank
   ]);
 
-  chart.setOption({
+  chartInstance.setOption({
     animation: false,
     grid: { top: 18, right: 24, bottom: 74, left: 66 },
     tooltip: {
@@ -258,7 +309,7 @@ const renderChart = () => {
     },
     xAxis: {
       type: 'category',
-      data: matrix.value.dates,
+      data: matrixValue.dates,
       name: '交易日期',
       nameLocation: 'middle',
       nameGap: 48,
@@ -268,9 +319,9 @@ const renderChart = () => {
     },
     yAxis: {
       type: 'category',
-      data: matrix.value.ranks,
+      data: matrixValue.ranks,
       inverse: true,
-      name: '涨幅排名',
+      name: yAxisName,
       nameGap: 20,
       axisLine: { lineStyle: { color: '#CBD5E1' } },
       axisTick: { show: false },
@@ -328,7 +379,15 @@ const renderChart = () => {
       }
     }]
   }, true);
-  chart.resize();
+  chartInstance.resize();
+  return chartInstance;
+};
+
+const renderChart = () => {
+  if (!chartRef.value) {
+    return;
+  }
+  chart = renderHeatChart(chartRef.value, chart, matrix.value, '涨幅排名');
   if (chartShellRef.value) {
     const scrollPosition = pendingScrollPosition.value;
     pendingScrollPosition.value = null;
@@ -338,11 +397,24 @@ const renderChart = () => {
   }
 };
 
+const renderFallChart = () => {
+  if (!fallChartRef.value) {
+    return;
+  }
+  fallChart = renderHeatChart(fallChartRef.value, fallChart, fallMatrix.value, '跌幅排名');
+};
+
 onMounted(() => {
   isMounted.value = true;
-  resizeObserver = new ResizeObserver(() => chart?.resize());
+  resizeObserver = new ResizeObserver(() => {
+    chart?.resize();
+    fallChart?.resize();
+  });
   if (chartRef.value) {
     resizeObserver.observe(chartRef.value);
+  }
+  if (fallChartRef.value) {
+    resizeObserver.observe(fallChartRef.value);
   }
   loadAnalysis();
 });
@@ -351,6 +423,8 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   chart?.dispose();
   chart = null;
+  fallChart?.dispose();
+  fallChart = null;
 });
 </script>
 
@@ -408,6 +482,13 @@ onBeforeUnmount(() => {
   border: 1px solid #edf2f7;
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+
+/* 页面下半部分的跌幅热力图：恢复常规高度并与上方留出间距 */
+.analysis-surface.fall-surface {
+  min-height: auto;
+  margin-top: 20px;
+  height: calc(100vh - 185px);
 }
 
 .surface-header {

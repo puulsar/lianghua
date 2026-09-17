@@ -8,13 +8,13 @@ import com.brotherc.aquant.index.model.vo.FundFlowGraphNodeVO;
 import com.brotherc.aquant.index.model.vo.FundFlowGraphVO;
 import com.brotherc.aquant.index.model.vo.FundFlowSummaryVO;
 import com.brotherc.aquant.index.model.vo.MarketSentimentVO;
-import com.brotherc.aquant.index.entity.StockIndexHistory;
-import com.brotherc.aquant.index.repository.StockIndexHistoryRepository;
+import com.brotherc.aquant.industry.repository.StockIndustryBoardHistoryRepository;
 import com.brotherc.aquant.industry.repository.StockIndustryBoardRepository;
+import com.brotherc.aquant.stock.repository.StockQuoteHistoryRepository;
 import com.brotherc.aquant.stock.repository.StockQuoteRepository;
+import com.brotherc.aquant.stock.repository.StockTradeCalendarRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
@@ -31,9 +31,17 @@ import java.util.*;
 @RequiredArgsConstructor
 public class StockMarketService {
 
+    /** 「近5日成交额」展示天数 */
+    private static final int RECENT_TURNOVER_DAYS = 5;
+    /** 取日期轴时为今日补位多查一天 */
+    private static final int TURNOVER_AXIS_QUERY_DAYS = 6;
+    private static final BigDecimal YI_YUAN = new BigDecimal("1000000000000");
+
     private final StockIndustryBoardRepository stockIndustryBoardRepository;
+    private final StockIndustryBoardHistoryRepository stockIndustryBoardHistoryRepository;
     private final StockQuoteRepository stockQuoteRepository;
-    private final StockIndexHistoryRepository stockIndexHistoryRepository;
+    private final StockQuoteHistoryRepository stockQuoteHistoryRepository;
+    private final StockTradeCalendarRepository stockTradeCalendarRepository;
 
     public FundFlowGraphVO getGraphData() {
         List<StockIndustryBoard> boards = stockIndustryBoardRepository.findAll();
@@ -235,54 +243,134 @@ public class StockMarketService {
         }
 
         // 构建近5日成交额列表 (单位: 万亿)
+        // 日期轴以【个股历史行情】为准：它按全市场逐只同步，是本地最完整的交易日序列。
+        // 不能用板块历史的「实际存在的日期」当轴——板块历史盘后回补受上游同花顺发布时间影响，
+        // 曾出现「17:45 回补时上游当日数据还没出 → 返回空数组 → 被当成成功静默跳过」导致库里
+        // 永久缺一天；若按存在日期当轴，缺口会被悄悄吞掉：图上少一根柱子，且「较昨日」
+        // 会跨成隔两个交易日的差值。这里显式按交易日对齐，并对板块缺失日回退个股汇总。
         try {
-            List<DailyTurnoverItem> dailyTurnoverList = new ArrayList<>();
-            BigDecimal todayTrillion = vo.getTotalTurnover() != null && vo.getTotalTurnover().compareTo(BigDecimal.ZERO) > 0
-                    ? vo.getTotalTurnover().divide(new BigDecimal("1000000000000"), 2, RoundingMode.HALF_UP)
-                    : new BigDecimal("2.57");
-
             LocalDate today = LocalDate.now();
-            DateTimeFormatter mmddFormatter = DateTimeFormatter.ofPattern("MM-dd");
+            String todayStr = today.format(DateTimeFormatter.ISO_LOCAL_DATE);
 
-            List<StockIndexHistory> shHistories = stockIndexHistoryRepository.findByIndexCodeOrderByTradeDateDesc(
-                    "sh000001", PageRequest.of(0, 5)
-            );
-
-            if (shHistories != null && shHistories.size() >= 4) {
-                List<StockIndexHistory> list = new ArrayList<>(shHistories);
-                Collections.reverse(list);
-                for (int i = 0; i < Math.min(4, list.size()); i++) {
-                    StockIndexHistory h = list.get(i);
-                    BigDecimal amt = h.getTurnover() != null
-                            ? h.getTurnover().multiply(new BigDecimal("2.35")).divide(new BigDecimal("1000000000000"), 2, RoundingMode.HALF_UP)
-                            : todayTrillion.multiply(new BigDecimal("0.90")).setScale(2, RoundingMode.HALF_UP);
-                    dailyTurnoverList.add(new DailyTurnoverItem(
-                            h.getTradeDate().format(mmddFormatter), amt, false
-                    ));
-                }
-            } else {
-                for (int i = 4; i >= 1; i--) {
-                    LocalDate d = today.minusDays(i);
-                    if (d.getDayOfWeek() == DayOfWeek.SATURDAY) {
-                        d = d.minusDays(1);
-                    } else if (d.getDayOfWeek() == DayOfWeek.SUNDAY) {
-                        d = d.minusDays(2);
-                    }
-                    BigDecimal simulated = todayTrillion.multiply(new BigDecimal("0.85").add(new BigDecimal(i * 0.03))).setScale(2, RoundingMode.HALF_UP);
-                    dailyTurnoverList.add(new DailyTurnoverItem(d.format(mmddFormatter), simulated, false));
-                }
+            // 盘中/收盘后实时行情已落到今天 → 今日优先用实时全市场成交额
+            boolean realtimeToday = false;
+            if (isTradingDay(today) && vo.getTotalTurnover() != null
+                    && vo.getTotalTurnover().compareTo(BigDecimal.ZERO) > 0) {
+                LocalDateTime maxCreatedAt = stockQuoteRepository.findMaxCreatedAt();
+                realtimeToday = maxCreatedAt != null && today.equals(maxCreatedAt.toLocalDate());
             }
 
-            dailyTurnoverList.add(new DailyTurnoverItem(
-                    today.format(mmddFormatter), todayTrillion, true
-            ));
+            List<String> dateAxis = new ArrayList<>(stockQuoteHistoryRepository
+                    .findRecentTradeDates(TURNOVER_AXIS_QUERY_DAYS));
+            if (realtimeToday && !dateAxis.contains(todayStr)) {
+                dateAxis.add(todayStr);
+            }
+            Collections.sort(dateAxis);
+            if (dateAxis.size() > RECENT_TURNOVER_DAYS) {
+                dateAxis = dateAxis.subList(dateAxis.size() - RECENT_TURNOVER_DAYS, dateAxis.size());
+            }
+            if (dateAxis.isEmpty()) {
+                log.warn("近5日成交额跳过构建：个股历史行情为空，无法确定交易日序列");
+                return vo;
+            }
+
+            Map<String, BigDecimal> boardAmountByDate = sumBoardAmountByTradeDates(dateAxis);
+            Map<String, BigDecimal> quoteAmountByDate = sumQuoteTurnoverByTradeDates(dateAxis);
+
+            List<DailyTurnoverItem> dailyTurnoverList = new ArrayList<>();
+            // 未四舍五入的「万亿」值，仅用于计算「较昨日」，避免 0.01 万亿(100亿)量化误差
+            List<BigDecimal> rawTurnovers = new ArrayList<>();
+            List<String> fallbackDates = new ArrayList<>();
+            DateTimeFormatter mmddFormatter = DateTimeFormatter.ofPattern("MM-dd");
+
+            for (String date : dateAxis) {
+                BigDecimal amount = boardAmountByDate.get(date);
+                if (amount == null) {
+                    amount = quoteAmountByDate.get(date);
+                    if (amount != null) {
+                        fallbackDates.add(date);
+                    }
+                }
+                if (date.equals(todayStr) && realtimeToday) {
+                    amount = vo.getTotalTurnover();
+                }
+                if (amount == null) {
+                    continue;
+                }
+
+                BigDecimal amountWanYi = amount.divide(YI_YUAN, 6, RoundingMode.HALF_UP);
+                dailyTurnoverList.add(new DailyTurnoverItem(
+                        LocalDate.parse(date).format(mmddFormatter),
+                        amountWanYi.setScale(2, RoundingMode.HALF_UP),
+                        date.equals(todayStr)
+                ));
+                rawTurnovers.add(amountWanYi);
+            }
+
+            if (!fallbackDates.isEmpty()) {
+                log.warn("近5日成交额：板块历史缺失 {} 天，已回退个股历史成交额汇总，dates={}",
+                        fallbackDates.size(), fallbackDates);
+            }
 
             vo.setRecent5DaysTurnover(dailyTurnoverList);
+
+            // 「较昨日」用真实的前后两个交易日成交额差（尾部两笔即最新与前一交易日）
+            if (rawTurnovers.size() >= 2) {
+                BigDecimal latest = rawTurnovers.get(rawTurnovers.size() - 1);
+                BigDecimal previous = rawTurnovers.get(rawTurnovers.size() - 2);
+                if (previous.compareTo(BigDecimal.ZERO) > 0) {
+                    BigDecimal diff = latest.subtract(previous);
+                    vo.setTurnoverChangeAmount(diff.multiply(YI_YUAN).setScale(2, RoundingMode.HALF_UP));
+                    vo.setVolumeRatio(latest.divide(previous, 2, RoundingMode.HALF_UP));
+                    vo.setVolumeChangePercent(diff.divide(previous, 4, RoundingMode.HALF_UP)
+                            .multiply(new BigDecimal("100")).setScale(1, RoundingMode.HALF_UP));
+                }
+            }
         } catch (Exception e) {
-            log.debug("构建近5日成交额列表异常", e);
+            log.warn("构建近5日成交额列表异常", e);
         }
 
         return vo;
+    }
+
+    /** 按交易日汇总板块成交额（各行业板块 amount 之和，单位：元） */
+    private Map<String, BigDecimal> sumBoardAmountByTradeDates(List<String> dates) {
+        Map<String, BigDecimal> amountByDate = new HashMap<>();
+        for (Object[] row : stockIndustryBoardHistoryRepository.sumAmountByTradeDates(dates)) {
+            if (row == null || row[0] == null || row[1] == null) {
+                continue;
+            }
+            amountByDate.put(String.valueOf(row[0]), new BigDecimal(String.valueOf(row[1])));
+        }
+        return amountByDate;
+    }
+
+    /** 按交易日汇总个股成交额（各股 turnover 之和，单位：元），板块历史缺口时的兜底 */
+    private Map<String, BigDecimal> sumQuoteTurnoverByTradeDates(List<String> dates) {
+        Map<String, BigDecimal> amountByDate = new HashMap<>();
+        for (Object[] row : stockQuoteHistoryRepository.sumTurnoverByTradeDates(dates)) {
+            if (row == null || row[0] == null || row[1] == null) {
+                continue;
+            }
+            amountByDate.put(String.valueOf(row[0]), new BigDecimal(String.valueOf(row[1])));
+        }
+        return amountByDate;
+    }
+
+    /**
+     * 判断是否为 A 股交易日：周末与 stock_trade_calendar 中登记的节假日休市
+     */
+    private boolean isTradingDay(LocalDate date) {
+        DayOfWeek dayOfWeek = date.getDayOfWeek();
+        if (dayOfWeek == DayOfWeek.SATURDAY || dayOfWeek == DayOfWeek.SUNDAY) {
+            return false;
+        }
+        try {
+            return !stockTradeCalendarRepository.existsByTradeDateAndMarket(date.toString(), "A");
+        } catch (Exception e) {
+            log.debug("交易日判断失败，按交易日处理", e);
+            return true;
+        }
     }
 
 }

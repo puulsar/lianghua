@@ -44,11 +44,25 @@ public class StockQuoteHistoryService {
         String tradeDate = stockHelper.latestClosedTradeDay(now).toString();
 
         // 提取所有股票代码；如果上游异常返回重复代码，保留最后一条行情。
+        // 停牌/无行情的股票，实时接口返回的是开高低收与成交量全为 0 的占位行；
+        // 这类行绝不能当日 K 落库：会在图上画出一根「从 0 拉到昨收」的假 K 线
+        // （2026-09-11 / 09-15 各有一批停牌股被这样写坏），也会把已有的正确行覆盖成 0。
+        // 正常成交的股票成交量必然 > 0，据此把占位行挡在库外（当日上游日线本来也不会有这两天）。
         Map<String, StockZhASpot> spotMap = new LinkedHashMap<>();
+        int invalidCount = 0;
         for (StockZhASpot spot : stockZhASpotList) {
-            if (spot != null && spot.getCode() != null) {
-                spotMap.put(spot.getCode(), spot);
+            if (spot == null || spot.getCode() == null) {
+                continue;
             }
+            if (!isValidSpotQuote(spot)) {
+                invalidCount++;
+                continue;
+            }
+            spotMap.put(spot.getCode(), spot);
+        }
+        if (invalidCount > 0) {
+            log.warn("实时行情中有 {} 条无有效成交的占位数据（停牌/无行情），本次跳过写入日 K，tradeDate={}",
+                    invalidCount, tradeDate);
         }
         if (spotMap.isEmpty()) {
             return;
@@ -96,6 +110,25 @@ public class StockQuoteHistoryService {
         stockQuoteHistoryRepository.saveAll(saveList);
     }
 
+    /**
+     * 实时行情里这一条是否代表「当天真的成交过」。
+     *
+     * <p>停牌 / 无行情的股票，上游返回的是开高低收与成交量全为 0 的占位行（部分股票连最新价也是 0），
+     * 必须过滤掉，否则会在日 K 里造出一根从 0 拉到昨收的假 K 线，并覆盖掉原本正确的行。
+     * 正常成交（含一字板）的股票开高低收与成交量都必然大于 0，所以这个条件不会误伤。</p>
+     */
+    private boolean isValidSpotQuote(StockZhASpot spot) {
+        return isPositive(spot.getOpenPrice())
+                && isPositive(spot.getHighPrice())
+                && isPositive(spot.getLowPrice())
+                && isPositive(spot.getLatestPrice())
+                && isPositive(spot.getVolume());
+    }
+
+    private boolean isPositive(BigDecimal value) {
+        return value != null && value.compareTo(BigDecimal.ZERO) > 0;
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public void save(List<StockZhADaily> stockZhAHists, String code, String name, LocalDateTime now) {
         if (CollectionUtils.isEmpty(stockZhAHists)) {
@@ -140,7 +173,9 @@ public class StockQuoteHistoryService {
             stockQuoteHistory.setHighPrice(daily.getHigh());
             stockQuoteHistory.setLowPrice(daily.getLow());
             stockQuoteHistory.setVolume(daily.getVolume());
-            stockQuoteHistory.setTurnover(daily.getTurnover());
+            // akshare 个股日线里 turnover 字段是「换手率(%)」，成交额在 amount 字段；
+            // 本表 turnover 列语义为「成交额(元)」，必须取 amount，否则历史 K 线成交额全部失真。
+            stockQuoteHistory.setTurnover(daily.getAmount());
             stockQuoteHistory.setQuoteTime("15:00:00");
             stockQuoteHistory.setCreatedAt(now);
             saveList.add(stockQuoteHistory);

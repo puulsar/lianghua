@@ -7,6 +7,7 @@ import com.brotherc.aquant.stock.entity.StockQuote;
 import com.brotherc.aquant.stock.model.dto.StockQuoteHistoryProjection;
 import com.brotherc.aquant.stock.repository.StockQuoteHistoryRepository;
 import com.brotherc.aquant.strategy.model.vo.StockTradeBacktestVO;
+import com.brotherc.aquant.strategy.support.StrategyReliability;
 import com.brotherc.aquant.strategy.model.vo.StockTradeSignalVO;
 import lombok.RequiredArgsConstructor;
 import org.apache.commons.math3.stat.inference.TTest;
@@ -152,35 +153,13 @@ public class MacdStrategy {
             netValue = netValue.multiply(BigDecimal.ONE.add(tradeReturn));
         }
 
-        int tradeCount = tradeReturns.size();
-        BigDecimal winRate = tradeCount == 0 ? BigDecimal.ZERO : BigDecimal.valueOf(winCount)
-                .divide(BigDecimal.valueOf(tradeCount), 4, RoundingMode.HALF_UP);
-        Double tValue = null;
-        Double pValue = null;
-        String reliability = "样本不足";
-
-        if (tradeCount >= 2) {
-            double[] samples = tradeReturns.stream().mapToDouble(Double::doubleValue).toArray();
-            double sampleMean = tradeReturnSum / tradeCount;
-            try {
-                tValue = tTest.t(0D, samples);
-                double twoSidedPValue = tTest.tTest(0D, samples);
-                if (!Double.isFinite(tValue) || !Double.isFinite(twoSidedPValue)) {
-                    tValue = null;
-                    reliability = sampleMean > 0 ? "低(方差0)" : "低";
-                } else {
-                    pValue = tValue > 0 ? twoSidedPValue / 2D : 1D - twoSidedPValue / 2D;
-                    reliability = sampleMean > 0 && pValue < 0.05 ? "高"
-                            : sampleMean > 0 && pValue < 0.10 ? "中" : "低";
-                }
-            } catch (Exception ignored) {
-                reliability = sampleMean > 0 ? "低(方差0)" : "低";
-            }
-        }
+        StrategyReliability.Result reliability = StrategyReliability.evaluate(tradeReturns);
 
         return new StockTradeBacktestVO(
-                stock.getCode(), stock.getName(), netValue.subtract(BigDecimal.ONE), tradeCount,
-                winRate, tValue, pValue, reliability, stock.getLatestPrice(), stock.getPir(), stock.getCreatedAt()
+                stock.getCode(), stock.getName(), netValue.subtract(BigDecimal.ONE),
+                reliability.getSampleCount(), reliability.getWinRate(),
+                reliability.getTValue(), reliability.getPValue(), reliability.getReliability(),
+                stock.getLatestPrice(), stock.getPir(), stock.getCreatedAt()
         );
     }
 

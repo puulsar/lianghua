@@ -109,8 +109,10 @@ export const getStockBoardIndustryLatest = () => {
     return api.get<ResponseDTO<string>>('/stockSync/stockBoardIndustryLatest');
 };
 
+export type IndustryAnalysisOrder = 'rise' | 'fall';
+
 export const getIndustrySourceAnalysis = (params: {
-    source: IndustryDataSource; startDate: string; endDate: string; rankLimit?: number
+    source: IndustryDataSource; startDate: string; endDate: string; rankLimit?: number; order?: IndustryAnalysisOrder
 }) => api.get<ResponseDTO<IndustrySourceSnapshot<IndustryRiseAnalysisPoint[]>>>('/industrySource/analysis', { params, timeout: 60000 });
 
 export const getIndustrySourceOverview = (params: { source: IndustryDataSource; industry: string; tradeDate?: string }) =>

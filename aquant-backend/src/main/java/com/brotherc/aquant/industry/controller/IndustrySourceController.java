@@ -47,11 +47,13 @@ public class IndustrySourceController {
             @RequestParam(defaultValue = "THS") IndustryDataSource source,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
-            @RequestParam(defaultValue = "20") Integer rankLimit
+            @RequestParam(defaultValue = "20") Integer rankLimit,
+            @RequestParam(defaultValue = "rise") String order
     ) {
+        boolean fallRanking = "fall".equalsIgnoreCase(order);
         return ResponseDTO.success(resolve(source, current -> current == IndustryDataSource.THS
-                ? analysisService.analysis(startDate, endDate, rankLimit)
-                : emQueryService.analysis(startDate, endDate, rankLimit)));
+                ? analysisService.analysis(startDate, endDate, rankLimit, fallRanking)
+                : emQueryService.analysis(startDate, endDate, rankLimit, fallRanking)));
     }
 
     @GetMapping("/overview")
